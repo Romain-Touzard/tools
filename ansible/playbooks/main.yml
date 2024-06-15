@@ -1,0 +1,32 @@
+- name: Make a Workstation
+  hosts: all
+  become: yes
+  roles:
+    #- prep
+    #- gitea
+    - caddy
+  # vars_prompt:
+  #   - name: "user_name"
+  #     prompt: "Entrez le nom d'utilisateur pour la vm "
+  #     private: no
+
+  #   - name: "user_password"
+  #     prompt: "Entrez le mot de passe"
+  #     private: yes
+  #     encrypt: "sha512_crypt"
+  #     confirm: yes
+  #     salt_size: 7
+
+    # - name: "gitea_user_email"
+    #   prompt: "Entrez l'email de l'utilisateur pour Gitea"
+    #   private: no
+
+    # - name: "gitea_user"
+    #   prompt: "Entrez le nom d'utilisateur pour Gitea"
+    #   private: no
+
+    # - name: "gitea_password"
+    #   prompt: "Entrez le mot de passe"
+    #   private: yes
+    #   confirm: yes
+    #   salt_size: 7

@@ -1,0 +1,15 @@
+ant:latest
+antisamy-markup-formatter:latest
+build-timeout:latest
+cloudbees-folder:latest
+configuration-as-code:latest
+credentials-binding:latest
+email-ext:latest
+git:latest
+gitea:latest
+mailer:latest
+matrix-auth:latest
+ssh-slaves:latest
+timestamper:latest
+workflow-aggregator:latest
+ws-cleanup:latest

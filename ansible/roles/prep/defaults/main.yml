@@ -1,0 +1,4 @@
+nfs_server_share: /srv/nfs
+nfs_client_share: /cible/nfs
+nfs_client_ip: "{{ ansible_default_ipv4.address }}"
+nfs_server_ip: "{{ ansible_host }}"

@@ -1,0 +1,65 @@
+- name: Create build directory
+  file:
+    path: "{{ jenkins_dir }}"
+    state: directory
+    owner: h168
+    group: h168
+    mode: "0755"
+
+- name: copy dummy website
+  ansible.builtin.copy:
+    src: ./files/
+    dest: "{{ build_dir }}"
+    mode: "0644"
+
+- name: Create casc file
+  file:
+    path: "{{ jenkins_casc_file }}"
+    state: touch
+    owner: h168
+    group: h168
+    mode: "0755"
+
+- name: Template a file to /etc/file.conf
+  template:
+    src: casc.yaml.j2
+    dest: "{{ jenkins_casc_file }}"
+    owner: h168
+    group: h168
+    mode: "0644"
+
+- name: build container image
+  docker_image:
+    name: "jenkins"
+    source: build
+    build:
+      path: "{{ build_dir }}"
+    tag: "v1.0"
+
+- name: Start jenkins container
+  docker_container:
+    name: jenkins
+    image: jenkins:v1.0
+    state: started
+    ports:
+      - "8080:8080"
+      - "50000:50000"
+    volumes:
+      - "{{ jenkins_dir }}:/var/jenkins_home"
+    restart_policy: on-failure
+
+- name: affiche la valeur de token
+  debug:
+    var: token
+
+- name: Générer le script Groovy à partir du template Jinja2
+  ansible.builtin.template:
+    src: add_gitea_credentials.groovy.j2
+    dest: "/tmp/add_gitea_credentials.groovy"
+
+- name: Exécuter le script Groovy sur Jenkins
+  jenkins_script:
+    url: http://votre_adresse_jenkins:port
+    user: votre_utilisateur_admin
+    password: votre_mot_de_passe_admin
+    script: "{{ lookup('file', '/tmp/add_gitea_credentials.groovy') }}"

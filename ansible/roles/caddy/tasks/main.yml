@@ -1,0 +1,37 @@
+- name: Install a Caddy server on docker with hello-world
+  block:
+    - name: Create a Caddy project directory
+      file:
+        path: "{{ caddy_project_dest }}"
+        state: directory
+
+    - name: Copy docker-compose.yml 
+      copy:
+        src: "{{ caddy_project_src }}/docker-compose.yml"
+        dest: "{{ caddy_project_dest }}/docker-compose.yml"
+
+    - name: Copy Config 
+      copy:
+        src: "{{ caddy_project_src }}/Caddyfile"
+        dest: "{{ caddy_project_dest }}/Caddyfile"
+
+    - name: Install via docker-compose
+      community.docker.docker_compose_v2:
+        project_src: "{{ caddy_project_dest }}"
+        files:
+          - docker-compose.yml
+        project_name: "{{ caddy_project_name }}"
+        state: present
+
+
+    - name: Wait for Caddy to be up
+      wait_for:
+        host: "{{ external_host }}"
+        port: 80
+    
+    - name: Test the Caddy server
+      uri:
+        url: "http://{{ external_host }}"
+        status_code: 200
+        return_content: yes
+        timeout: 5

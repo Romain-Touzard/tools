@@ -1,0 +1,55 @@
+version: "3.7"
+
+networks:
+  gitea:
+    external: false
+
+services:
+  server:
+    image: gitea/gitea:1.21.7-rootless
+    container_name: gitea
+    environment:
+      - USER_UID=1000
+      - USER_GID=1000
+      - GITEA__database__DB_TYPE=postgres
+      - GITEA__database__HOST=db:5432
+      - GITEA__database__NAME=gitea
+      - GITEA__database__USER=gitea
+      - GITEA__database__PASSWD=gitea
+    restart: always
+    networks:
+      - gitea
+    volumes:
+      - data:/var/lib/gitea
+      - gitea:/etc/gitea
+      - /etc/timezone:/etc/timezone:ro
+      - /etc/localtime:/etc/localtime:ro
+    configs:
+      - source: gitea_config
+        target: /etc/gitea/app.ini
+    ports:
+      - "3000:3000"
+      - "2222:2222"
+    depends_on:
+      - db
+
+  db:
+    image: postgres:14
+    restart: always
+    environment:
+      - POSTGRES_USER=gitea
+      - POSTGRES_PASSWORD=gitea
+      - POSTGRES_DB=gitea
+    networks:
+      - gitea
+    volumes:
+      - postgres:/var/lib/postgresql/data
+
+volumes:
+  postgres:
+  gitea:
+  data:
+
+configs:
+  gitea_config:
+    file: ./config

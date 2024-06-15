@@ -1,0 +1,11 @@
+# Ansible Settings
+ansible_user: "toto"
+ansible_ssh_private_key_file: "~/.ssh/gitlab_rsa.pub"
+
+# Gitea Settings
+external_host: "git.w.local"
+external_url: "https://{{ external_host }}"
+external_ssl_source: "user"
+gitea_root_password: "{{ vault_gitea_root_password }}"
+gitea_user: "toto"
+gitea_user_email: "toto@localhost"

@@ -1,0 +1,97 @@
+---
+# - name: Assure que l'utilisateur existe avec le mot de passe fourni
+#   ansible.builtin.user:
+#     name: "{{ user_name }}"
+#     password: "{{ user_password }}"
+#     state: present
+
+# - name: Donne à l'utilisateur des droits sudo
+#   ansible.builtin.user:
+#     name: "{{ user_name}}"
+#     groups: sudo
+#     append: yes
+
+- name: Add local DNS resolution for {{ external_host }}
+  lineinfile:
+    path: /etc/hosts
+    regexp: '^127\.0\.0\.1'
+    line: "127.0.0.1      localhost {{ external_host }}"
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Change the hostname
+  hostname:
+    name: "{{ external_host }}"
+  become: true
+  become_user: root
+  become_method: sudo
+  when: external_host is defined
+
+- name: Create a NFS client - server share directory
+  block: 
+    - name: Install NFS server
+      local_action: 
+        module: ansible.builtin.apt
+        name: nfs-kernel-server
+        state: present
+    
+    - name: Install NFS client
+      apt:
+        name: nfs-common
+        state: present
+
+    - name: Install NFS client
+      apt:
+        name: nfs-common
+        state: present
+
+    - name: Create a NFS server share directory
+      local_action: 
+        module: ansible.builtin.file
+        path: "{{ nfs_server_share }}"
+        state: directory
+        mode: '0777'
+        owner: nobody
+        group: nogroup
+
+    - name: Configure /etc/exports of host-server 
+      local_action: 
+          module: ansible.builtin.lineinfile
+          path: /etc/exports
+          line: "{{ nfs_server_share }} * (rw,sync,no_subtree_check,no_root_squash) "
+          state: present
+    
+    - name: Restart NFS server
+      local_action: 
+        module: ansible.builtin.service
+        name: nfs-kernel-server
+        state: restarted
+
+    - name: Create a NFS client share directory
+      ansible.builtin.file:
+        path: "{{ nfs_client_share }}"
+        state: directory
+        mode: '0777'
+
+    - name: Mount the NFS share on the client
+      ansible.builtin.mount:
+        path: "{{ nfs_client_share }}"
+        src: "{{ nfs_server_ip }}:{{ nfs_server_share }}"
+        fstype: nfs
+        opts: defaults
+        state: mounted
+    
+    - name: Test the NFS share
+      local_action: 
+        module: ansible.builtin.file
+        path: "{{ nfs_server_share }}/test.txt"
+        state: touch
+        mode: '0777'
+        owner: nobody
+        group: nogroup
+
+        
+
+    
+

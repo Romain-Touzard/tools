@@ -1,0 +1,15 @@
+# all:
+#   children:
+#     vms:
+#       hosts:
+#         VM1:
+#           ansible_host: 172.20.10.3
+#   vars:
+#     ansible_python_interpreter: /usr/bin/python3
+#     ansible_user: toto
+#     external_host: "git.w.local"
+#     external_url: "https://{{ external_host }}"
+#     # ansible_ssh_private_key_file: "~/.ssh/id_rsa.pub"
+
+# defaults:
+#   enable_task_debugger: True

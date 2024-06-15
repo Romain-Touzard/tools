@@ -1,0 +1,4 @@
+external_host: "git.w.local"
+external_url: "https://{{ external_host }}"
+ansible_user: "toto"
+ansible_ssh_private_key_file: "~/.ssh/gitlab_rsa.pub"

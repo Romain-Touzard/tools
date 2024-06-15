@@ -1,0 +1,3 @@
+caddy_project_src: ./defaults/files
+caddy_project_dest: ~/caddy
+caddy_project_name: hello-world

@@ -1,0 +1,40 @@
+---
+- hosts: vms
+  vars:
+    default_container_name: docker
+    default_container_image: ubuntu
+    default_container_command: sleep 1d
+    token: ""
+  vars_prompt:
+    # - name: "user_name"
+    #   prompt: "Entrez le nom d'utilisateur pour la vm "
+    #   private: no
+
+    # - name: "user_password"
+    #   prompt: "Entrez le mot de passe"
+    #   private: yes
+    #   encrypt: "sha512_crypt"
+    #   confirm: yes
+    #   salt_size: 7
+
+    - name: "gitea_user_email"
+      prompt: "Entrez l'email de l'utilisateur pour Gitea"
+      private: no
+
+    - name: "gitea_user"
+      prompt: "Entrez le nom d'utilisateur pour Gitea"
+      private: no
+
+    - name: "gitea_password"
+      prompt: "Entrez le mot de passe"
+      private: yes
+      confirm: yes
+      salt_size: 7
+  # become: yes
+  # become_method: sudo
+
+  roles:
+    # - prep ## sudo access
+    # - docker
+    - gitea
+    - jenkins

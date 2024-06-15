@@ -1,0 +1,7 @@
+gitea_project_src: ./defaults/files
+gitea_project_dest: ~/
+gitea_project_name: "gitea"
+gitea_user: "toto"
+gitea_password: "toto"
+gitea_user_email: "toto@localhost"
+gitea_root_password: "{{ vault_gitea_root_password }}"
