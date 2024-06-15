@@ -1,0 +1,77 @@
+- name: Update Consul nodes
+  include_tasks: update-gitlab.yml
+  when: inventory_hostname == hostname_result
+  loop: "{{ query('inventory_hostnames', 'consul') | sort }}"
+  loop_control:
+    loop_var: hostname_result
+
+- name: Update Postgres nodes
+  include_tasks: update-gitlab.yml
+  when: inventory_hostname == hostname_result
+  loop: "{{ query('inventory_hostnames', 'postgres') | sort }}"
+  loop_control:
+    loop_var: hostname_result
+
+- name: Update PgBouncer nodes
+  include_tasks: update-gitlab.yml
+  when: inventory_hostname == hostname_result
+  loop: "{{ query('inventory_hostnames', 'pgbouncer') | sort }}"
+  loop_control:
+    loop_var: hostname_result
+
+- name: Update Redis nodes
+  include_tasks: update-gitlab.yml
+  when: inventory_hostname == hostname_result
+  loop: "{{ query('inventory_hostnames', 'redis:redis_cache:redis_persistent') | sort }}"
+  loop_control:
+    loop_var: hostname_result
+
+- name: Update Gitaly nodes
+  include_tasks: update-gitlab.yml
+  when: inventory_hostname == hostname_result
+  loop: "{{ query('inventory_hostnames', 'gitaly') | sort }}"
+  loop_control:
+    loop_var: hostname_result
+
+- name: Update Praefect deploy node with all migrations
+  include_tasks: update-gitlab.yml
+  when: "'praefect_primary' in group_names"
+
+- name: Update other Praefect nodes
+  include_tasks: update-gitlab.yml
+  when: inventory_hostname == hostname_result
+  loop: "{{ query('inventory_hostnames', 'praefect_secondary') | sort }}"
+  loop_control:
+    loop_var: hostname_result
+
+- name: Update GitLab Rails deploy node with pre migrations
+  include_tasks:
+    file: update-gitlab.yml
+    apply:
+      environment:
+        SKIP_POST_DEPLOYMENT_MIGRATIONS: "true"
+  when: "'gitlab_rails_primary' in group_names"
+
+- name: Update other GitLab Rails nodes
+  include_tasks: update-gitlab.yml
+  when: inventory_hostname == hostname_result
+  loop: "{{ query('inventory_hostnames', 'gitlab_rails_secondary') | sort }}"
+  loop_control:
+    loop_var: hostname_result
+
+- name: Update Sidekiq nodes
+  include_tasks: update-gitlab.yml
+  when: inventory_hostname == hostname_result
+  loop: "{{ query('inventory_hostnames', 'sidekiq') | sort }}"
+  loop_control:
+    loop_var: hostname_result
+
+- name: Restart geo-logcursor on secondary site if present
+  command: gitlab-ctl restart geo-logcursor
+  when:
+    - ('gitlab_rails' in group_names)
+    - (geo_secondary_site_group_name in groups)
+
+- name: Run post-deployment migrations via GitLab Rails deploy node
+  import_tasks: post-deployment-migrations.yml
+  when: "'gitlab_rails_primary' in group_names"

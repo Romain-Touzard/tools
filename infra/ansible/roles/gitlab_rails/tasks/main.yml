@@ -1,0 +1,306 @@
+---
+- name: Mount NFS if configured
+  include_role:
+    name: gitlab_nfs
+    tasks_from: nfs_mount
+  when:
+    - "'gitlab_nfs' in groups"
+
+- name: Propagate Secrets if existing
+  include_role:
+    name: common
+    tasks_from: secrets
+  when: gitlab_secrets_setup
+  tags:
+    - reconfigure
+    - secrets
+    - gitlab-secrets
+
+- name: Copy over any Custom Files
+  copy:
+    src: "{{ item.src_path }}"
+    dest: "{{ item.dest_path }}"
+    mode: "{{ item.mode if item.mode is defined else 'preserve' }}"
+  loop: "{{ gitlab_rails_custom_files_paths }}"
+  tags: reconfigure
+
+- name: Copy Praefect or Gitaly CA files if configured
+  block:
+    - name: Copy Praefect Internal SSL CA file if configured
+      copy:
+        src: "{{ praefect_ssl_ca_file }}"
+        dest: '/etc/gitlab/trusted-certs/praefect_ca.pem'
+        mode: '0644'
+      when:
+        - "'praefect' in groups"
+        - praefect_ssl
+        - praefect_ssl_ca_file != ''
+
+    - name: Copy Gitaly Internal SSL CA file if configured
+      copy:
+        src: "{{ gitaly_ssl_ca_file }}"
+        dest: '/etc/gitlab/trusted-certs/gitaly_ca.pem'
+        mode: '0644'
+      when:
+        - "'praefect' not in groups"
+        - "'gitaly' in groups"
+        - gitaly_ssl
+        - gitaly_ssl_ca_file != ''
+  tags: reconfigure
+
+- name: Check if custom config exists
+  stat:
+    path: "{{ gitlab_rails_custom_config_file }}"
+  delegate_to: localhost
+  become: false
+  tags: reconfigure
+  register: gitlab_rails_custom_config_file_path
+
+- name: Get Omnibus Postgres Primary
+  block:
+    - name: Get latest Postgres primary
+      command: gitlab-ctl get-postgresql-primary
+      register: postgres_leader_int_address
+      delegate_to: "{{ groups['postgres'][0] }}"
+      delegate_facts: true
+      become: true
+
+    - name: Update Postgres primary IP and Port
+      set_fact:
+        postgres_host: "{{ postgres_leader_int_address.stdout.split(':')[0] }}"
+        postgres_port: "{{ postgres_leader_int_address.stdout.split(':')[1] }}"
+  when:
+    - "'postgres' in groups and groups['postgres'] | length > 1"
+    - not postgres_external
+  tags:
+    - reconfigure
+    - db_migrate
+
+- name: Non Omnibus database related tasks
+  block:
+    - name: Create Database User
+      community.postgresql.postgresql_user:
+        login_host: "{{ postgres_host }}"
+        login_port: "{{ postgres_port }}"
+        login_user: "{{ postgres_admin_username }}"
+        login_password: "{{ postgres_admin_password }}"
+        db: "template1"
+        name: "{{ postgres_username.split('@')[0] }}"
+        password: "{{ postgres_password }}"
+        role_attr_flags: CREATEDB
+        expires: infinity
+
+    - name: Create Database
+      community.postgresql.postgresql_db:
+        login_host: "{{ postgres_host }}"
+        login_port: "{{ postgres_port }}"
+        login_user: "{{ postgres_username }}"
+        login_password: "{{ postgres_password }}"
+        name: "{{ postgres_database_name }}"
+        encoding: UTF-8
+
+    - name: Enable required Postgres extensions
+      community.postgresql.postgresql_ext:
+        login_host: "{{ postgres_host }}"
+        login_port: "{{ postgres_port }}"
+        login_user: "{{ postgres_admin_username }}"
+        login_password: "{{ postgres_admin_password }}"
+        name: "{{ item }}"
+        db: "{{ postgres_database_name }}"
+      loop: ['pg_trgm', 'btree_gist', 'plpgsql', 'pg_stat_statements']
+  when:
+    - postgres_external
+    - postgres_external_prep
+    - "'gitlab_rails_primary' in group_names"
+    - geo_secondary_site_group_name not in groups
+  tags:
+    - reconfigure
+    - db_migrate
+    - postgres_external
+
+- name: Run Database Migrations
+  block:
+    - name: Setup GitLab deploy node config file with DB Migrations
+      template:
+        src: templates/gitlab-rails.gitlab.rb.j2
+        dest: /etc/gitlab/gitlab.rb
+      vars:
+        db_migrate: true
+      tags:
+        - reconfigure
+        - db_migrate
+
+    - name: Setup Custom Config
+      template:
+        src: "{{ gitlab_rails_custom_config_file }}"
+        dest: "/etc/gitlab/gitlab.gitlab_rails.custom.rb"
+        mode: "0644"
+      tags:
+        - reconfigure
+        - db_migrate
+      when: gitlab_rails_custom_config_file_path.stat.exists
+
+    - name: Reconfigure GitLab deploy node
+      command: gitlab-ctl reconfigure
+      register: result
+      retries: 3
+      until: result is success
+      tags:
+        - reconfigure
+        - db_migrate
+  when: "'gitlab_rails_primary' in group_names"
+
+- name: Setup all GitLab Rails config files
+  template:
+    src: templates/gitlab-rails.gitlab.rb.j2
+    dest: /etc/gitlab/gitlab.rb
+  register: result
+  retries: 3
+  until: result is success
+  tags: reconfigure
+
+- name: Setup Custom Config
+  template:
+    src: "{{ gitlab_rails_custom_config_file }}"
+    dest: "/etc/gitlab/gitlab.gitlab_rails.custom.rb"
+    mode: "0644"
+  when: gitlab_rails_custom_config_file_path.stat.exists
+  tags: reconfigure
+
+- name: Remove old Custom Config if not configured
+  file:
+    path: "/etc/gitlab/gitlab.gitlab_rails.custom.rb"
+    state: absent
+  when: not gitlab_rails_custom_config_file_path.stat.exists
+  tags: reconfigure
+
+- name: Reconfigure all GitLab Rails
+  command: gitlab-ctl reconfigure
+  register: result
+  retries: 3
+  until: result is success
+  tags: reconfigure
+
+- name: Propagate Secrets if new or changed
+  include_role:
+    name: common
+    tasks_from: secrets
+  vars:
+    gitlab_secrets_post_reconfigure: true
+  when: gitlab_secrets_setup
+  tags:
+    - reconfigure
+    - secrets
+    - gitlab-secrets
+
+- name: Propagate SSH Keys
+  block:
+    - name: Set up temp folder on local
+      tempfile:
+        state: directory
+        prefix: "gitlab-environment-toolkit-"
+      register: ssh_temp_folder
+      delegate_to: localhost
+      become: false
+      run_once: true
+
+    - name: Find all SSH host keys on primary Rails node
+      ansible.builtin.find:
+        paths: "{{ gitlab_shell_ssh_key_path }}/"
+        patterns: 'ssh_host_*'
+      register: ssh_host_keys
+      when: "'gitlab_rails_primary' in group_names"
+
+    - name: Fetch all SSH host keys from primary Rails node to local
+      fetch:
+        src: "{{ item.path }}"
+        dest: "{{ ssh_temp_folder.path }}/"
+        flat: true
+      with_items: "{{ ssh_host_keys.files }}"
+      no_log: true
+      when: "'gitlab_rails_primary' in group_names"
+
+    - name: Copy all SSH host keys to secondary Rails nodes
+      copy:
+        src: "{{ item }}"
+        dest: "{{ gitlab_shell_ssh_key_path }}"
+      with_fileglob: "{{ ssh_temp_folder.path }}/ssh_host_*"
+      no_log: true
+      when: "'gitlab_rails_secondary' in group_names"
+
+    - name: Remove temp folder
+      file:
+        path: "{{ ssh_temp_folder.path }}"
+        state: absent
+      delegate_to: localhost
+      become: false
+      run_once: true
+  when: "groups['gitlab_rails'] | length > 1"
+  tags:
+    - reconfigure
+    - secrets
+    - ssh_keys
+
+- name: Configure SSH
+  block:
+    - name: Configure SSH Fast Lookup if OpenSSH service being used
+      blockinfile:
+        path: /etc/ssh/sshd_config
+        marker: "# {mark} ANSIBLE MANAGED BLOCK"
+        block: |
+          Match User git   # Apply the AuthorizedKeysCommands to the git user only
+            AuthorizedKeysCommand /opt/gitlab/embedded/service/gitlab-shell/bin/gitlab-shell-authorized-keys-check git %u %k
+            AuthorizedKeysCommandUser git
+          Match all        # End match, settings apply to all users again
+        state: "{{ 'present' if gitlab_shell_ssh_daemon == 'openssh' else 'absent' }}"
+
+    - name: Reload OpenSSH service if being used
+      service:
+        name: "{{ 'sshd' if ansible_facts['os_family'] == 'RedHat' else 'ssh' }}"
+        state: reloaded
+      when: gitlab_shell_ssh_daemon == 'openssh'
+  tags:
+    - reconfigure
+    - secrets
+    - ssh_keys
+
+- name: Restart GitLab
+  command: gitlab-ctl restart
+  register: result
+  retries: 2
+  until: result is success
+  tags:
+    - reconfigure
+    - restart
+
+# https://docs.gitlab.com/ee/administration/job_logs.html#enable-or-disable-incremental-logging
+- name: Enable Incremental Logging (Object Storage)
+  command: "gitlab-rails runner 'Feature.enable(:ci_enable_live_trace)'"
+  tags: reconfigure
+  when:
+    - "'gitlab_rails_primary' in group_names"
+    - gitlab_object_storage_type == 'object_storage'
+    - geo_secondary_site_group_name not in groups
+
+- name: Create skip-auto-reconfigure file
+  file:
+    path: /etc/gitlab/skip-auto-reconfigure
+    state: touch
+    mode: u=rw,g=r,o=r
+
+- name: Run Custom Tasks
+  block:
+    - name: Check if Custom Tasks file exists
+      stat:
+        path: "{{ gitlab_rails_custom_tasks_file }}"
+      register: gitlab_rails_custom_tasks_file_path
+      delegate_to: localhost
+      become: false
+
+    - name: Run Custom Tasks
+      include_tasks:
+        file: "{{ gitlab_rails_custom_tasks_file }}"
+        apply:
+          tags: custom_tasks
+      when: gitlab_rails_custom_tasks_file_path.stat.exists
+  tags: custom_tasks

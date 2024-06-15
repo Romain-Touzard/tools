@@ -1,0 +1,21 @@
+- name: Disable Write to "authorized_keys" file setting
+  block:
+    - name: Disable Write to "authorized_keys" file setting via GitLab Rails
+      command: "gitlab-rails runner 'ApplicationSetting.last.update(authorized_keys_enabled: false)'"
+      delegate_to: "{{ groups['gitlab_rails'][0] }}"
+      delegate_facts: true
+      become: true
+      when: "'gitlab_rails' in groups"
+
+    - name: Disable Write to "authorized_keys" file setting via GitLab Toolbox pod
+      kubernetes.core.k8s_exec:
+        pod: "{{ toolbox_pod }}"
+        namespace: "{{ gitlab_charts_release_namespace }}"
+        command: "gitlab-rails runner 'ApplicationSetting.last.update(authorized_keys_enabled: false)'"
+      register: result
+      retries: 24
+      delay: 5
+      until: result is success
+      when:
+        - toolbox_pod is defined
+        - "'gitlab_rails' not in groups"

@@ -1,0 +1,107 @@
+- name: Upgrade packages to their latest version if configured
+  package:
+    name: "*"
+    state: latest
+  register: result
+  retries: 60
+  delay: 5
+  until: result is success
+  when: system_packages_upgrade | bool
+
+- name: Remove packages that are no longer required if configured
+  package:
+    autoremove: true
+  register: result
+  retries: 60
+  delay: 5
+  until: result is success
+  when: system_packages_autoremove | bool
+
+# Automated Security Upgrades
+- name: Configure Automatic Security Upgrades (Ubuntu / Debian)
+  block:
+    - name: Install unattended-upgrades package
+      package:
+        name: unattended-upgrades
+        state: present
+
+    - name: Run Automatic Security Upgrades directly (Ubuntu / Debian)
+      command: unattended-upgrade
+      register: result
+      retries: 60
+      delay: 5
+      until: result is success
+  when:
+    - system_packages_auto_security_upgrade
+    - ansible_facts['os_family'] == "Debian"
+
+- name: Configure Automatic Security Upgrades (RHEL 8, Amazon Linux 2023)
+  block:
+    - name: Install dnf-automatic package
+      package:
+        name: dnf-automatic
+        state: present
+
+    - name: Configure dnf-automatic package
+      replace:
+        path: /etc/dnf/automatic.conf
+        regexp: "{{ item.search }}"
+        replace: "{{ item.replace }}"
+      loop:
+        - { search: 'apply_updates = \w+$', replace: 'apply_updates = yes' }
+        - { search: 'upgrade_type = \w+$', replace: 'upgrade_type = security' }
+
+    - name: Disable old dnf-automatic service if enabled
+      service:
+        name: dnf-automatic-install.timer
+        enabled: false
+
+    - name: Enable and start dnf-automatic service
+      service:
+        name: dnf-automatic.timer
+        enabled: true
+        state: started
+
+    - name: Run Automatic Security Upgrades directly (RHEL)
+      command: dnf-automatic
+      register: result
+      retries: 60
+      delay: 5
+      until: result is success
+  when:
+    - system_packages_auto_security_upgrade
+    - ansible_facts['os_family'] == 'RedHat'
+    - ansible_facts['distribution_major_version'] != '2'
+
+- name: Configure Automatic Security Upgrades (RHEL - Amazon Linux 2)
+  block:
+    - name: Install yum-cron package
+      package:
+        name: yum-cron
+        state: present
+
+    - name: Configure yum-cron package
+      replace:
+        path: /etc/yum/yum-cron.conf
+        regexp: "{{ item.search }}"
+        replace: "{{ item.replace }}"
+      loop:
+        - { search: 'apply_updates = \w+$', replace: 'apply_updates = yes' }
+        - { search: 'update_cmd = \w+$', replace: 'update_cmd = security' }
+
+    - name: Enable and start yum-cron service
+      service:
+        name: yum-cron
+        enabled: true
+        state: started
+
+    - name: Run Automatic Security Upgrades directly (RHEL - Amazon Linux 2)
+      command: yum update --security -y
+      register: result
+      retries: 60
+      delay: 5
+      until: result is success
+  when:
+    - system_packages_auto_security_upgrade
+    - ansible_facts['distribution'] == 'Amazon'
+    - ansible_facts['distribution_major_version'] == '2'

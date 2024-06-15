@@ -1,0 +1,44 @@
+---
+- name : Post Install of GitLab
+  block: 
+
+  - name: Update GitLab configuration
+    lineinfile:
+      path: /etc/gitlab/gitlab.rb
+      regexp: '^external_url .*'
+      line: "external_url '{{ external_url }}'"
+      state: present
+      insertafter: '^'
+  
+  - name: Disable letsencrypt
+    lineinfile:
+      path: /etc/gitlab/gitlab.rb
+      line: "letsencrypt['enable'] = false"
+      state: present
+
+  - name: Reconfigure GitLab
+    command: sudo gitlab-ctl reconfigure
+    become: true
+    become_user: root
+    become_method: sudo
+
+  - name: Create user for client rafina_d
+    command: |
+        sudo gitlab-rails runner -e production "u = User.new(username: 'rafina_d', email: 'rafina_d@etna-alternance.net', name: 'Admin', password: '{{ gitlab_root_password }}',
+        password_confirmation: '{{ gitlab_root_password }}', admin: true)
+        u.assign_personal_namespace
+        u.skip_confirmation!
+        u.save!
+        "
+    ignore_errors: true
+  
+  - name: Create user for client rinaz_a
+    command: |
+        sudo gitlab-rails runner -e production "u = User.new(username: 'rinaz_s', email: 'selim.rinaz@etna.io', name: 'Admin', password: '{{ gitlab_root_password }}',
+        password_confirmation: '{{ gitlab_root_password }}', admin: true)
+        u.assign_personal_namespace
+        u.skip_confirmation!
+        u.save!
+        "
+    ignore_errors: true
+

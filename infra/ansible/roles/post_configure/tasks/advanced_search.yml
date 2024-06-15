@@ -1,0 +1,245 @@
+- name: Clean out previous Advanced Search configuration and index
+  block:
+    - name: Delete old Advanced Search index
+      block:
+        - name: Delete old Advanced Search index for GitLab via GitLab Rails
+          command: "{{ item }}"
+          loop:
+            - gitlab-rake gitlab:elastic:delete_index
+            - gitlab-rake gitlab:elastic:clear_index_status
+          delegate_to: "{{ groups['gitlab_rails'][0] }}"
+          delegate_facts: true
+          become: true
+          register: delete_result
+          failed_when:
+            - delete_result.rc != 0
+            - '"no address" not in delete_result.stderr'
+            - '"Net::OpenTimeout" not in delete_result.stderr'
+          when: "'gitlab_rails' in groups"
+
+        - name: Delete old Advanced Search index for GitLab via GitLab Toolbox pod
+          kubernetes.core.k8s_exec:
+            pod: "{{ toolbox_pod }}"
+            namespace: "{{ gitlab_charts_release_namespace }}"
+            command: "{{ item }}"
+          loop:
+            - gitlab-rake gitlab:elastic:delete_index
+            - gitlab-rake gitlab:elastic:clear_index_status
+          register: delete_result
+          failed_when:
+            - delete_result.rc != 0
+            - '"no address" not in delete_result.stderr'
+            - '"Net::OpenTimeout" not in delete_result.stderr'
+            - '"Failed to open TCP connection" not in delete_result.stderr'
+          when:
+            - toolbox_pod is defined
+            - "'gitlab_rails' not in groups"
+
+    - name: Unconfigure Advanced Search settings
+      block:
+        - name: Unconfigure Advanced Search settings via GitLab Rails
+          command: |
+            gitlab-rails runner "
+              ApplicationSetting.last.update(elasticsearch_url: '')
+              ApplicationSetting.last.update(elasticsearch_indexing: false)
+              ApplicationSetting.last.update(elasticsearch_search: false)
+            "
+          delegate_to: "{{ groups['gitlab_rails'][0] }}"
+          delegate_facts: true
+          become: true
+          when: "'gitlab_rails' in groups"
+
+        - name: Unconfigure Advanced Search settings via GitLab Toolbox pod
+          kubernetes.core.k8s_exec:
+            pod: "{{ toolbox_pod }}"
+            namespace: "{{ gitlab_charts_release_namespace }}"
+            command: |
+              gitlab-rails runner "
+                ApplicationSetting.last.update(elasticsearch_url: '')
+                ApplicationSetting.last.update(elasticsearch_indexing: false)
+                ApplicationSetting.last.update(elasticsearch_search: false)
+              "
+          when:
+            - toolbox_pod is defined
+            - "'gitlab_rails' not in groups"
+
+    - name: Pause for 60 secs for old Advanced Search index to clear
+      wait_for:
+        timeout: 60
+  when: advanced_search_clean_install | bool
+
+- name: Get and save Environment Settings
+  block:
+    - name: Get and save Environment Settings via GitLab Rails
+      command: |
+        gitlab-rails runner 'print ApplicationSetting.last.attributes.select {|k,v| !k.include?("encrypted") }.to_json'
+      delegate_to: "{{ groups['gitlab_rails'][0] }}"
+      delegate_facts: true
+      become: true
+      register: env_settings_response_rails
+      when: "'gitlab_rails' in groups"
+
+    - name: Save Environment Settings
+      set_fact:
+        gitlab_environment_settings: '{{ env_settings_response_rails.stdout | from_json }}'
+      when: "'gitlab_rails' in groups"
+
+    - name: Get and save Environment Settings via GitLab Toolbox pod
+      kubernetes.core.k8s_exec:
+        pod: "{{ toolbox_pod }}"
+        namespace: "{{ gitlab_charts_release_namespace }}"
+        command: |
+          gitlab-rails runner 'print ApplicationSetting.last.attributes.select {|k,v| !k.include?("encrypted") }.to_json'
+      register: env_settings_response_pod
+      when:
+        - toolbox_pod is defined
+        - "'gitlab_rails' not in groups"
+
+    - name: Save Environment Settings
+      set_fact:
+        gitlab_environment_settings: '{{ env_settings_response_pod.stdout | from_json }}'
+      when:
+        - toolbox_pod is defined
+        - "'gitlab_rails' not in groups"
+
+- name: Configure Advanced Search Indexing and URL setting
+  block:
+    - name: Enable GitLab Advanced Search indexing setting via GitLab Rails
+      command: |
+        gitlab-rails runner "
+          ApplicationSetting.last.update(elasticsearch_url: \"{{ advanced_search_hosts | join(',') }}\")
+          ApplicationSetting.last.update(elasticsearch_indexing: true)
+        "
+      delegate_to: "{{ groups['gitlab_rails'][0] }}"
+      delegate_facts: true
+      become: true
+      register: advanced_search_status_result
+      retries: 5
+      delay: 5
+      until: advanced_search_status_result is success
+      when: "'gitlab_rails' in groups"
+
+    - name: Enable GitLab Advanced Search indexing setting via GitLab Toolbox pod
+      kubernetes.core.k8s_exec:
+        pod: "{{ toolbox_pod }}"
+        namespace: "{{ gitlab_charts_release_namespace }}"
+        command: |
+          gitlab-rails runner "
+            ApplicationSetting.last.update(elasticsearch_url: \"{{ advanced_search_hosts | join(',') }}\")
+            ApplicationSetting.last.update(elasticsearch_indexing: true)
+          "
+      register: advanced_search_status_result
+      retries: 5
+      delay: 5
+      until: advanced_search_status_result is success
+      when:
+        - toolbox_pod is defined
+        - "'gitlab_rails' not in groups"
+
+    - name: Pause for 60 secs to allow Sidekiq caches to be updated
+      wait_for:
+        timeout: 60
+  when: gitlab_environment_settings.elasticsearch_url != (advanced_search_hosts | join(',')) or not gitlab_environment_settings.elasticsearch_indexing
+
+- name: Perform Advanced Search Indexing
+  block:
+    - name: Index all GitLab data
+      block:
+        - name: Index all GitLab data via GitLab Rails
+          command: gitlab-rake gitlab:elastic:index
+          delegate_to: "{{ groups['gitlab_rails'][0] }}"
+          delegate_facts: true
+          become: true
+          when: "'gitlab_rails' in groups"
+
+        - name: Index all GitLab data via GitLab Toolbox pod
+          kubernetes.core.k8s_exec:
+            pod: "{{ toolbox_pod }}"
+            namespace: "{{ gitlab_charts_release_namespace }}"
+            command: gitlab-rake gitlab:elastic:index
+          when:
+            - toolbox_pod is defined
+            - "'gitlab_rails' not in groups"
+
+    - name: Wait until indexing is complete
+      block:
+        - name: Wait until indexing is complete via GitLab Rails
+          command: gitlab-rake gitlab:elastic:index_projects_status
+          delegate_to: "{{ groups['gitlab_rails'][0] }}"
+          delegate_facts: true
+          become: true
+          register: index_status_result
+          retries: 20
+          delay: 10
+          until: "(index_status_result.stdout | regex_search('[0-9]+\\.[0-9]+') | float > 90.0) or '(0/0 projects)' in index_status_result.stdout"
+          when: "'gitlab_rails' in groups"
+
+        - name: Wait until indexing is complete via GitLab Toolbox pod
+          kubernetes.core.k8s_exec:
+            pod: "{{ toolbox_pod }}"
+            namespace: "{{ gitlab_charts_release_namespace }}"
+            command: gitlab-rake gitlab:elastic:index_projects_status
+          register: index_status_result
+          retries: 20
+          delay: 10
+          until: "(index_status_result.stdout | regex_search('[0-9]+\\.[0-9]+') | float > 90.0) or '(0/0 projects)' in index_status_result.stdout"
+          when:
+            - toolbox_pod is defined
+            - "'gitlab_rails' not in groups"
+      when: advanced_search_enable | bool
+  when: not gitlab_environment_settings.elasticsearch_indexing
+
+- name: Get and save Environment Settings
+  block:
+    - name: Get and save Environment Settings via GitLab Rails
+      command: |
+        gitlab-rails runner 'print ApplicationSetting.last.attributes.select {|k,v| !k.include?("encrypted") }.to_json'
+      delegate_to: "{{ groups['gitlab_rails'][0] }}"
+      delegate_facts: true
+      become: true
+      register: env_settings_response
+      when: "'gitlab_rails' in groups"
+
+    - name: Save Environment Settings
+      set_fact:
+        gitlab_environment_settings: '{{ env_settings_response_rails.stdout | from_json }}'
+      when: "'gitlab_rails' in groups"
+
+    - name: Get and save Environment Settings via GitLab Toolbox pod
+      kubernetes.core.k8s_exec:
+        pod: "{{ toolbox_pod }}"
+        namespace: "{{ gitlab_charts_release_namespace }}"
+        command: |
+          gitlab-rails runner 'print ApplicationSetting.last.attributes.select {|k,v| !k.include?("encrypted") }.to_json'
+      register: env_settings_response_pod
+      when:
+        - toolbox_pod is defined
+        - "'gitlab_rails' not in groups"
+
+    - name: Save Environment Settings
+      set_fact:
+        gitlab_environment_settings: '{{ env_settings_response_pod.stdout | from_json }}'
+      when:
+        - toolbox_pod is defined
+        - "'gitlab_rails' not in groups"
+
+- name: Enable Advanced Search
+  block:
+    - name: Enable Advanced Search via GitLab Rails
+      command: "gitlab-rails runner 'ApplicationSetting.last.update(elasticsearch_search: true)'"
+      delegate_to: "{{ groups['gitlab_rails'][0] }}"
+      delegate_facts: true
+      become: true
+      when: "'gitlab_rails' in groups"
+
+    - name: Enable Advanced Search via GitLab Toolbox pod
+      kubernetes.core.k8s_exec:
+        pod: "{{ toolbox_pod }}"
+        namespace: "{{ gitlab_charts_release_namespace }}"
+        command: "gitlab-rails runner 'ApplicationSetting.last.update(elasticsearch_search: true)'"
+      when:
+        - toolbox_pod is defined
+        - "'gitlab_rails' not in groups"
+  when:
+    - advanced_search_enable | bool
+    - not gitlab_environment_settings.elasticsearch_search

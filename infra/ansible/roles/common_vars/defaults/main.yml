@@ -1,0 +1,459 @@
+################################################################################
+## Ansible Settings
+################################################################################
+
+ansible_python_interpreter: auto_silent
+swap_file_state: absent
+internal_cidr_16: "{{ (ansible_default_ipv4.address + '/16') | ansible.utils.ipaddr('network/prefix') }}"
+inventory_dir_failsafe: "{{ (ansible_inventory_sources[0] | dirname) if ansible_inventory_sources[0] is search('.ini|.yml|.yaml') else ansible_inventory_sources[0] }}"
+inventory_path: "{{ inventory_dir | default(inventory_dir_failsafe, true) }}"
+
+################################################################################
+## Cloud Provider Settings
+################################################################################
+
+cloud_provider: ''
+cloud_provider_labels_name: "{{ 'labels' if cloud_provider == 'gcp' else 'tags' }}"
+
+internal_addr_use_hostnames: false
+internal_ip_lookup: {gcp: ['networkInterfaces', 0, 'networkIP'], aws: ['private_ip_address'], azure: ['private_ipv4_addresses', 0], none: ['ansible_default_ipv4', 'address']}
+internal_hostname_lookup: {gcp: ['ansible_facts', 'fqdn'], aws: ['private_dns_name'], azure: ['ansible_facts', 'fqdn'], none: ['ansible_facts', 'fqdn']}
+internal_addr_lookup: "{{ internal_hostname_lookup[cloud_provider] if internal_addr_use_hostnames else internal_ip_lookup[cloud_provider] }}"
+
+## GCP
+gcp_project: "{{ project_name | default('', true) }}"
+gcp_zone: ""
+
+## AWS
+aws_region: ""
+aws_allocation_ids: ""
+
+################################################################################
+## Network Settings
+################################################################################
+
+external_url_sanitised: "{{ external_url | regex_replace('\\/$', '') }}"
+external_host: "{{ external_url | regex_replace('^https?:\/\/') }}"
+external_ip: ""  # IP is only used for Cloud Native Hybrid deployments - provided by user
+
+## External SSL
+external_url_ssl: "{{ 'https' in external_url }}"
+external_ssl_source: ""  # letsencrypt or user
+
+### Let's Encrypt Certificates
+external_ssl_letsencrypt_issuer_email: ""
+
+### User Provided Certificates
+external_ssl_files_host_path: "{{ inventory_path }}/../files/certificates"
+external_ssl_files_host_certificate_file: "{{ external_ssl_files_host_path }}/{{ external_host }}.pem"
+external_ssl_files_host_key_file: "{{ external_ssl_files_host_path }}/{{ external_host }}.key"
+
+## Load Balancers
+
+### HAProxy
+#### haproxy_internal_primary_site_group_name: Sets the group name for haproxy_internal_int_addr for Geo or non Geo deployments
+haproxy_internal_primary_site_group_name: "{% if geo_primary_site_group_name + '_haproxy_internal_primary' in groups %}{{ geo_primary_site_group_name }}_haproxy_internal_primary{% elif 'haproxy_internal' in groups %}haproxy_internal{% else %}{% endif %}"
+haproxy_internal_int_addr: "{{ (groups[haproxy_internal_primary_site_group_name] | sort | map('extract', hostvars, internal_addr_lookup) | join('')) if 'haproxy_internal' in groups else ''}}"
+haproxy_external_int_addr: "{{ (groups['haproxy_external'] | sort | map('extract', hostvars, internal_addr_lookup) | join('')) if 'haproxy_external' in groups else '' }}"
+
+### Internal Load Balancer
+internal_lb_host: "{{ geo_primary_postgres_host if geo_primary_postgres_host != '' else haproxy_internal_int_addr }}"
+
+## Offline setup
+offline_setup: false
+
+################################################################################
+## GitLab Install Settings
+################################################################################
+
+prefix: ''
+omnibus_node: true
+
+## When setting a specific version for upgrading to, review [standard GitLab Upgrade rules still apply](https://docs.gitlab.com/ee/update/#upgrade-paths)
+gitlab_version: "{{ lookup('env','GITLAB_VERSION') }}"
+## Alternatively set to "gitlab-ce" to install the Community Edition (Does not work for environments with Consul, PGBouncer or Patroni - 3k+)
+gitlab_edition: "gitlab-ee"
+
+gitlab_node_type: "{{ lookup('vars', cloud_provider_labels_name, default = {}).gitlab_node_type | default((group_names | reject('match', '.*_primary|.*_secondary') | first), true) | replace('-', '_') }}"
+
+## Set to env var, package with version wildcard or just latest
+gitlab_repo_package_version_syntax: "{{ '-' if ansible_facts['os_family'] == 'RedHat' else '=' }}"
+gitlab_repo_package: "{{ lookup('env','GITLAB_REPO_PACKAGE') | default(gitlab_edition + gitlab_repo_package_version_syntax + gitlab_version + '*' if gitlab_version != '' else gitlab_edition, true) }}"
+## Select the nightly build by setting GITLAB_REPO_SCRIPT_URL to "https://packages.gitlab.com/install/repositories/gitlab/nightly-builds/script.deb.sh"
+gitlab_repo_script_name: {Debian: 'script.deb.sh', RedHat: 'script.rpm.sh'}
+gitlab_repo_script_url: "{{ lookup('env','GITLAB_REPO_SCRIPT_URL') | default('https://packages.gitlab.com/install/repositories/gitlab/' + gitlab_edition + '/' + gitlab_repo_script_name[ansible_facts['os_family']], true) }}"
+gitlab_repo_script_path: "/tmp/gitlab_install_repository.sh"
+gitlab_repo_list_path: "/etc/apt/sources.list.d/gitlab_{{ 'gitlab_' + 'nightly-builds' if 'nightly' in gitlab_repo_script_url else gitlab_edition }}.list"
+
+gitlab_deb_force_install: false
+## Specify absolute path to the local deb package on host
+gitlab_deb_host_path: "{{ lookup('env','GITLAB_HOST_DEB_PATH') }}"
+## Specify deb package url
+gitlab_deb_download_url: "{{ lookup('env','GITLAB_DEB_DOWNLOAD_URL') }}"
+gitlab_deb_download_url_headers: "{{ lookup('env','GITLAB_DEB_DOWNLOAD_URL_HEADERS') | default({}, true) }}"
+gitlab_deb_target_path: "{{ lookup('env','GITLAB_TARGET_DEB_PATH') | default('/tmp/gitlab_deb_package.deb', true) }}"
+
+## Specify absolute path to the local rpm package on host
+gitlab_rpm_host_path: "{{ lookup('env','GITLAB_HOST_RPM_PATH') }}"
+## Specify rpm package url
+gitlab_rpm_download_url: "{{ lookup('env','GITLAB_RPM_DOWNLOAD_URL') }}"
+gitlab_rpm_download_url_headers: "{{ lookup('env','GITLAB_RPM_DOWNLOAD_URL_HEADERS') | default({}, true) }}"
+gitlab_rpm_target_path: "{{ lookup('env','GITLAB_TARGET_RPM_PATH') | default('/tmp/gitlab_rpm_package.rpm', true) }}"
+
+gitlab_admin_email: "admin@example.com"
+
+gitlab_shell_ssh_daemon: "openssh"  # openssh or gitlab-sshd
+gitlab_shell_ssh_port: "{{ '22' if cloud_native_hybrid_environment else '2222' }}"
+gitlab_shell_ssh_internal_port: "{{ '2222' if (gitlab_shell_ssh_daemon == 'gitlab-sshd' or cloud_native_hybrid_environment) else '22' }}"
+gitlab_shell_ssh_key_path: "{{ '/var/opt/gitlab/gitlab-sshd' if gitlab_shell_ssh_daemon == 'gitlab-sshd' else '/etc/ssh/' }}"
+
+gitlab_secrets_setup: true
+
+# Object Storage Settings
+gitlab_object_storage_type: "object_storage"  # object_storage or nfs
+
+## Object Storage Buckets
+gitlab_object_storage_list: ["artifacts", "dependency_proxy", "lfs", "external_diffs", "packages", "terraform_state", "uploads", "backups", "registry", "ci_secure_files", "pages"]
+gitlab_object_storage_prefix: "{{ prefix }}"
+gitlab_object_storage_bucket_names:
+  artifacts: "{{ gitlab_object_storage_prefix }}-artifacts"
+  dependency_proxy: "{{ gitlab_object_storage_prefix }}-dependency-proxy"
+  external_diffs: "{{ gitlab_object_storage_prefix }}-mr-diffs"
+  lfs: "{{ gitlab_object_storage_prefix }}-lfs"
+  packages: "{{ gitlab_object_storage_prefix }}-packages"
+  terraform_state: "{{ gitlab_object_storage_prefix }}-terraform-state"
+  uploads: "{{ gitlab_object_storage_prefix }}-uploads"
+  backups: "{{ gitlab_object_storage_prefix }}-backups"
+  registry: "{{ gitlab_object_storage_prefix }}-registry"
+  ci_secure_files: "{{ gitlab_object_storage_prefix }}-ci-secure-files"
+  pages: "{{ gitlab_object_storage_prefix }}-pages"
+
+gitlab_object_storage_registry_chunksize_mb: "{{ '10' if cloud_provider == 'aws' else '5' }}"
+
+# Container Registry Settings
+container_registry_enable: "{{ (cloud_provider == 'aws' or cloud_provider == 'gcp') and external_url_ssl and external_ssl_source != '' and 'registry' in gitlab_object_storage_list }}"
+
+container_registry_external_url: "https://registry.{{ external_host }}"
+container_registry_external_host: "{{ container_registry_external_url | regex_replace('^https?:\/\/') }}"
+
+################################################################################
+## GitLab Component Settings (Omnibus)
+################################################################################
+
+# Consul
+consul_int_addrs: "{{ (groups['consul'] | sort | map('extract', hostvars, internal_addr_lookup) | list) if 'consul' in groups else [] }}"
+consul_additional_config: ''
+
+# GitLab Rails (Application nodes)
+gitlab_rails_int_addrs: "{{ (groups['gitlab_rails'] | sort | map('extract', hostvars, internal_addr_lookup) | list) if 'gitlab_rails' in groups else [] }}"
+gitlab_rails_monitoring_cidr_blocks: ['0.0.0.0/0']
+gitlab_rails_nginx_real_ip_trusted_cidr_blocks: []
+
+# GitLab Postgres / PGBouncer
+postgres_primary_int_addr: "{{ (groups['postgres_primary'] | sort | map('extract', hostvars, internal_addr_lookup) | join('')) if 'postgres_primary' in groups else '' }}"
+postgres_int_addrs: "{{ (groups['postgres'] | sort | map('extract', hostvars, internal_addr_lookup) | list) if 'postgres' in groups else [] }}"
+pgbouncer_int_addrs: "{{ (groups['pgbouncer'] | sort | map('extract', hostvars, internal_addr_lookup) | list) if 'pgbouncer' in groups else [] }}"
+
+postgres_host: "{{ postgres_primary_int_addr }}"
+postgres_port: '5432'
+postgres_migrations_host: "{{ postgres_host }}"
+postgres_migrations_port: '5432'
+postgres_username: "gitlab"
+postgres_password: ""
+postgres_admin_username: "{{ postgres_username }}"
+postgres_admin_password: "{{ postgres_password }}"
+postgres_database_name: "gitlabhq_production"
+postgres_load_balancing_hosts: []
+postgres_external: "{{ 'postgres' not in groups and postgres_host != '' }}"
+postgres_external_prep: true
+
+## Postgres Omnibus
+postgres_trust_auth_cidr_blocks: ['0.0.0.0/0']
+postgres_md5_auth_cidr_blocks: ['0.0.0.0/0']
+
+# Gitaly
+gitaly_int_addrs: "{{ (groups['gitaly'] | sort | map('extract', hostvars, internal_addr_lookup) | list) if 'gitaly' in groups else [] }}"
+gitaly_primary_int_addr: "{{ (groups['gitaly_primary'] | sort | map('extract', hostvars, internal_addr_lookup) | join('')) if 'gitaly_primary' in groups else '' }}"
+gitaly_secondary_int_addrs: "{{ (groups['gitaly_secondary'] | sort | map('extract', hostvars, internal_addr_lookup) | list) if 'gitaly_secondary' in groups else [] }}"
+gitaly_callback_internal_api_url: "{{ ('http://' + internal_lb_host) if 'haproxy_internal' in groups and 'gitlab_rails' in groups else external_url_sanitised }}"
+
+## Gitaly SSL
+gitaly_ssl_cert_file: ""
+gitaly_ssl_key_file: ""
+gitaly_ssl_ca_file: ""
+gitaly_ssl_port: "9999"
+gitaly_ssl: "{{ gitaly_ssl_cert_file != '' and gitaly_ssl_key_file != '' }}"
+
+# Pages
+pages_enable: "{{ pages_external_url != '' and 'pages' in gitlab_object_storage_list }}"
+pages_external_url: ""
+pages_host: "{{ pages_external_url | regex_replace('^https?:\/\/') }}"
+
+## Pages SSL
+pages_ssl_enable: "{{ 'https' in pages_external_url }}"
+pages_ssl_cert: "{{ lookup('file', pages_ssl_cert_file) if pages_ssl_cert_file != '' else '' }}"
+pages_ssl_cert_file: ""
+pages_ssl_key: "{{ lookup('file', pages_ssl_key_file) if pages_ssl_key_file != '' else '' }}"
+pages_ssl_key_file: ""
+
+# Praefect
+praefect_primary_int_addr: "{{ (groups['praefect_primary'] | map('extract', hostvars, internal_addr_lookup) | join('')) if 'praefect_primary' in groups else '' }}"
+praefect_secondary_int_addrs: "{{ (groups['praefect_secondary'] | sort | map('extract', hostvars, internal_addr_lookup) | list) if 'praefect_secondary' in groups else [] }}"
+praefect_int_addrs: "{{ (groups['praefect'] | sort | map('extract', hostvars, internal_addr_lookup) | list) if 'praefect' in groups else [] }}"
+praefect_external_token: ""
+
+## Praefect SSL
+praefect_ssl_cert_file: ""
+praefect_ssl_key_file: ""
+praefect_ssl_ca_file: ""
+praefect_ssl_port: "3305"
+praefect_ssl: "{{ praefect_ssl_cert_file != '' and praefect_ssl_key_file != '' }}"
+
+## Praefect Postgres
+praefect_postgres_int_addr: "{{ (groups['praefect_postgres'] | map('extract', hostvars, internal_addr_lookup) | join('')) if 'praefect_postgres_primary' in groups else '' }}"
+praefect_postgres_host: "{{ praefect_postgres_int_addr if praefect_postgres_int_addr != '' else postgres_host }}"
+praefect_postgres_port: 5432
+praefect_postgres_cache_host: "{{ praefect_postgres_host }}"
+praefect_postgres_cache_port: 5432
+praefect_postgres_migrations_host: "{{ praefect_postgres_host }}"
+praefect_postgres_migrations_port: 5432
+praefect_postgres_username: "praefect"
+praefect_postgres_password: ""
+praefect_postgres_admin_username: "{{ praefect_postgres_username if praefect_postgres_host != postgres_host else postgres_admin_username }}"
+praefect_postgres_admin_password: "{{ praefect_postgres_password if praefect_postgres_host != postgres_host else postgres_admin_password }}"
+praefect_postgres_database_name: "praefect_production"
+praefect_postgres_external: "{{ 'praefect_postgres' not in groups and praefect_postgres_host != '' }}"
+praefect_postgres_external_prep: "{{ true if praefect_postgres_host != postgres_host else postgres_external_prep }}"
+
+# GitLab Monitor
+monitor_int_addr: "{{ (groups['monitor'] | sort | map('extract', hostvars, internal_addr_lookup) | join('')) if 'monitor' in groups else '' }}"
+monitor_int_ip: "{{ (groups['monitor'] | sort | map('extract', hostvars, internal_ip_lookup[cloud_provider]) | join('')) if 'monitor' in groups else '' }}"
+monitor_prometheus_scrape_config_setup: true
+monitor_custom_prometheus_scrape_config: ''
+monitor_custom_rules: []
+monitor_custom_rules_path: "{{ inventory_path }}/../files/prometheus"
+
+# GitLab Redis
+## Combined
+redis_primary_int_addr: "{{ (groups['redis_primary'] | sort | map('extract', hostvars, internal_addr_lookup) | join('')) if 'redis' in groups else '' }}"
+redis_int_addrs: "{{ (groups['redis'] | sort | map('extract', hostvars, internal_addr_lookup) | list) if 'redis' in groups else [] }}"
+
+redis_host: "{{ redis_primary_int_addr }}"
+redis_password: ""
+redis_port: 6379
+redis_external: "{{ 'redis' not in groups and redis_host != '' }}"
+redis_external_ssl: "{{ cloud_provider == 'aws' }}"
+# https://docs.gitlab.com/omnibus/settings/redis.html#using-google-cloud-memorystore
+redis_external_enable_client: "{{ cloud_provider != 'gcp' }}"
+
+## Cache
+redis_cache_primary_int_addr: "{{ (groups['redis_cache_primary'] | sort | map('extract', hostvars, internal_addr_lookup) | join('')) if 'redis_cache' in groups else '' }}"
+redis_cache_int_addrs: "{{ (groups['redis_cache'] | sort | map('extract', hostvars, internal_addr_lookup) | list) if 'redis_cache' in groups else [] }}"
+
+redis_cache_host: "{{ redis_cache_primary_int_addr }}"
+redis_cache_password: "{{ redis_password }}"
+redis_cache_port: "{{ redis_port }}"
+redis_cache_external: "{{ 'redis_cache' not in groups and redis_cache_host != '' }}"
+redis_cache_external_ssl: "{{ redis_external_ssl }}"
+
+## Persistent
+redis_persistent_primary_int_addr: "{{ (groups['redis_persistent_primary'] | sort | map('extract', hostvars, internal_addr_lookup) | join('')) if 'redis_persistent' in groups else '' }}"
+redis_persistent_int_addrs: "{{ (groups['redis_persistent'] | sort | map('extract', hostvars, internal_addr_lookup) | list) if 'redis_persistent' in groups else [] }}"
+
+redis_persistent_host: "{{ redis_persistent_primary_int_addr }}"
+redis_persistent_password: "{{ redis_password }}"
+redis_persistent_port: "{{ redis_port }}"
+redis_persistent_external: "{{ 'redis_persistent' not in groups and redis_persistent_host != '' }}"
+redis_persistent_external_ssl: "{{ redis_external_ssl }}"
+
+redis_sentinel_port: 26379
+
+# Sidekiq
+sidekiq_int_addrs: "{{ (groups['sidekiq'] | sort | map('extract', hostvars, internal_addr_lookup) | list) if 'sidekiq' in groups else [] }}"
+
+################################################################################
+## GitLab Component Settings (Non-Omnibus)
+################################################################################
+
+# GitLab NFS
+gitlab_nfs_int_addr: "{{ groups['gitlab_nfs'] | sort | map('extract', hostvars, internal_addr_lookup) | join('') }}"
+gitlab_nfs_path: "{{ '/mnt/gitlab-nfs' if cloud_provider != 'azure' else '/srv/gitlab-nfs' }}"
+
+# Search
+opensearch_int_addrs: "{{ (groups['opensearch'] | sort | map('extract', hostvars, internal_addr_lookup) | list) if 'opensearch' in groups else [] }}"
+opensearch_urls: "{{ (opensearch_int_addrs | map('regex_replace', '^(.*)$', 'http://\\1:9200') | list) if opensearch_int_addrs | length > 0 else [] }}"
+
+advanced_search_hosts: "{{ opensearch_urls }}"
+advanced_search_external: "{{ 'opensearch' not in groups and advanced_search_hosts != [] }}"
+advanced_search_clean_install: "{{ lookup('env','ADVANCED_SEARCH_CLEAN_INSTALL') | default('false', true) }}"
+advanced_search_enable: true
+
+################################################################################
+## GitLab Cloud Native Hybrid Settings (Helm)
+################################################################################
+
+cloud_native_hybrid_environment: false
+
+cloud_native_hybrid_monitoring_setup: false
+cloud_native_hybrid_cluster_autoscaler_setup: false
+kubeconfig_setup: false
+
+# Geo
+cloud_native_hybrid_geo: false
+primary_cloud_native_hybrid_geo: "{{ cloud_native_hybrid_geo and geo_primary_site_group_name + '_gitlab_rails_primary' not in groups }}"
+secondary_cloud_native_hybrid_geo: "{{ cloud_native_hybrid_geo and geo_secondary_site_group_name + '_gitlab_rails_primary' not in groups }}"
+cloud_native_hybrid_geo_role: ""
+
+# Charts Settings
+## GitLab
+gitlab_charts_release_namespace: default
+
+### Webservice
+gitlab_charts_webservice_requests_memory_gb: 5
+gitlab_charts_webservice_limits_memory_gb: 5.25
+gitlab_charts_webservice_requests_cpu: 4
+gitlab_charts_webservice_min_replicas_scaler: 0.75
+gitlab_charts_webservice_max_replicas: ""
+gitlab_charts_webservice_min_replicas: ""
+
+### Sidekiq
+gitlab_charts_sidekiq_requests_memory_gb: 2
+gitlab_charts_sidekiq_limits_memory_gb: 4
+gitlab_charts_sidekiq_requests_cpu: 0.9
+gitlab_charts_sidekiq_min_replicas_scaler: 0.75
+gitlab_charts_sidekiq_max_replicas: ""
+gitlab_charts_sidekiq_min_replicas: ""
+
+## Kube Prometheus Stack
+kube_prometheus_stack_charts_namespace: monitoring
+kube_prometheus_stack_charts_storage_size: 100Gi
+kube_prometheus_stack_charts_storage_class: ""
+kube_prometheus_stack_charts_app_version: "v0.63.0"
+
+kube_prometheus_stack_charts_prometheus_scrape_config_setup: true
+kube_prometheus_stack_charts_custom_scrape_config: []
+
+consul_charts_namespace: consul
+consul_charts_app_version: "1.12.3"
+
+################################################################################
+## GitLab Component Custom Config / Tasks / Files
+################################################################################
+
+## Custom Config
+consul_custom_config_file: "{{ inventory_path }}/../files/gitlab_configs/consul.rb.j2"
+postgres_custom_config_file: "{{ inventory_path }}/../files/gitlab_configs/postgres.rb.j2"
+pgbouncer_custom_config_file: "{{ inventory_path }}/../files/gitlab_configs/pgbouncer.rb.j2"
+redis_custom_config_file: "{{ inventory_path }}/../files/gitlab_configs/redis.rb.j2"
+redis_cache_custom_config_file: "{{ inventory_path }}/../files/gitlab_configs/redis_cache.rb.j2"
+redis_persistent_custom_config_file: "{{ inventory_path }}/../files/gitlab_configs/redis_persistent.rb.j2"
+praefect_postgres_custom_config_file: "{{ inventory_path }}/../files/gitlab_configs/praefect_postgres.rb.j2"
+praefect_custom_config_file: "{{ inventory_path }}/../files/gitlab_configs/praefect.rb.j2"
+gitaly_custom_config_file: "{{ inventory_path }}/../files/gitlab_configs/gitaly.rb.j2"
+gitlab_rails_custom_config_file: "{{ inventory_path }}/../files/gitlab_configs/gitlab_rails.rb.j2"
+sidekiq_custom_config_file: "{{ inventory_path }}/../files/gitlab_configs/sidekiq.rb.j2"
+monitor_custom_config_file: "{{ inventory_path }}/../files/gitlab_configs/monitor.rb.j2"
+gitlab_charts_custom_config_file: "{{ inventory_path }}/../files/gitlab_configs/gitlab_charts.yml.j2"
+kube_prometheus_stack_charts_custom_config_file: "{{ inventory_path }}/../files/gitlab_configs/kube_prometheus_stack_charts.yml.j2"
+
+## Custom Tasks
+consul_custom_tasks_file: "{{ inventory_path }}/../files/gitlab_tasks/consul.yml"
+postgres_custom_tasks_file: "{{ inventory_path }}/../files/gitlab_tasks/postgres.yml"
+pgbouncer_custom_tasks_file: "{{ inventory_path }}/../files/gitlab_tasks/pgbouncer.yml"
+redis_custom_tasks_file: "{{ inventory_path }}/../files/gitlab_tasks/redis.yml"
+redis_cache_custom_tasks_file: "{{ inventory_path }}/../files/gitlab_tasks/redis_cache.yml"
+redis_persistent_custom_tasks_file: "{{ inventory_path }}/../files/gitlab_tasks/redis_persistent.yml"
+praefect_postgres_custom_tasks_file: "{{ inventory_path }}/../files/gitlab_tasks/praefect_postgres.yml"
+praefect_custom_tasks_file: "{{ inventory_path }}/../files/gitlab_tasks/praefect.yml"
+gitaly_custom_tasks_file: "{{ inventory_path }}/../files/gitlab_tasks/gitaly.yml"
+gitlab_rails_custom_tasks_file: "{{ inventory_path }}/../files/gitlab_tasks/gitlab_rails.yml"
+sidekiq_custom_tasks_file: "{{ inventory_path }}/../files/gitlab_tasks/sidekiq.yml"
+monitor_custom_tasks_file: "{{ inventory_path }}/../files/gitlab_tasks/monitor.yml"
+gitlab_charts_custom_tasks_file: "{{ inventory_path }}/../files/gitlab_tasks/gitlab_charts.yml"
+gitlab_charts_secrets_tasks_file: "{{ inventory_path }}/../files/gitlab_tasks/gitlab_charts_secrets.yml"
+
+common_custom_tasks_file: "{{ inventory_path }}/../files/gitlab_tasks/common.yml"
+haproxy_custom_tasks_file: "{{ inventory_path }}/../files/gitlab_tasks/haproxy.yml"
+post_configure_custom_tasks_file: "{{ inventory_path }}/../files/gitlab_tasks/post_configure.yml"
+uninstall_custom_tasks_file: "{{ inventory_path }}/../files/gitlab_tasks/uninstall.yml"
+
+## Custom Files
+
+consul_custom_files_paths: []
+postgres_custom_files_paths: []
+pgbouncer_custom_files_paths: []
+redis_custom_files_paths: []
+redis_cache_custom_files_paths: []
+redis_persistent_custom_files_paths: []
+praefect_postgres_custom_files_paths: []
+praefect_custom_files_paths: []
+gitaly_custom_files_paths: []
+gitlab_rails_custom_files_paths: []
+sidekiq_custom_files_paths: []
+monitor_custom_files_paths: []
+
+################################################################################
+## Subscription / License
+################################################################################
+gitlab_subscription_activation_code: ""
+
+gitlab_license_file: ""
+gitlab_license_text: "{{ lookup('file', gitlab_license_file) if gitlab_license_file != '' else '' }}"
+
+################################################################################
+## GitLab Geo Settings
+################################################################################
+
+maintenance_mode_message: "GitLab is undergoing maintenance"
+
+geo_primary_external_url: "{{ external_url }}"
+geo_primary_internal_url: "{{ geo_primary_external_url | default('') }}"
+geo_secondary_external_url: "{{ secondary_external_url if secondary_external_url is defined }}"
+geo_secondary_internal_url: "{{ geo_secondary_external_url | default('') }}"
+
+geo_primary_site_group_name: "geo_primary_site"
+geo_secondary_site_group_name: "geo_secondary_site"
+
+geo_primary_site_name: "Primary Site"
+geo_secondary_site_name: "Secondary Site"
+
+geo_replication_slot_modifier: "{{ 2 if geo_primary_site_group_name in group_names or geo_secondary_site_group_name in group_names else 1 }}"
+geo_primary_site_postgres_group_name: "{% if geo_primary_site_group_name + '_postgres_primary' in groups %}{{ geo_primary_site_group_name }}_postgres_primary{% elif geo_primary_site_group_name + '_gitlab_rails_primary' in groups %}{{ geo_primary_site_group_name }}_gitlab_rails_primary{% elif 'postgres_primary' in groups%}postgres_primary{% else %}gitlab_rails_primary{% endif %}"
+geo_primary_site_postgres_int_ip: "{{ geo_primary_postgres_host if geo_primary_postgres_host != '' else (groups[geo_primary_site_postgres_group_name] | sort | map('extract', hostvars, internal_ip_lookup[cloud_provider]) | join('')) }}"
+geo_secondary_site_postgres_group_name: "{% if geo_secondary_site_group_name + '_postgres_primary' in groups %}{{ geo_secondary_site_group_name }}_postgres_primary{% elif geo_secondary_site_group_name + '_gitlab_rails_primary' in groups %}{{ geo_secondary_site_group_name }}_gitlab_rails_primary{% else %}{% endif %}"
+geo_secondary_site_postgres_int_ip: "{{ (groups[geo_secondary_site_postgres_group_name] | sort | map('extract', hostvars, internal_ip_lookup[cloud_provider]) | join('')) if geo_secondary_site_postgres_group_name != '' else '' }}"
+
+geo_secondary_postgres_host: ""
+geo_secondary_praefect_postgres_host: ""
+
+geo_secondary_skip_hybrid_redeploy: false
+
+geo_disable_secondary_proxying: false
+geo_enable_object_storage_replication: true
+
+geo_max_replication_slots: 1
+
+geo_migration_task: "{{ 'geo:db:migrate' if ((gitlab_version != '') and (gitlab_version is version('14.6', '<'))) else 'db:migrate:geo' }}"
+
+geo_sql_replication_password: "{{ postgres_password }}"
+geo_sql_replication_password_md5: "{{ (geo_sql_replication_password + 'gitlab_replicator') | md5 }}"
+
+geo_primary_secrets_file: ""
+geo_primary_secrets_json: "{{ lookup('file', geo_primary_secrets_file) | from_json if geo_primary_secrets_file != '' }}"
+
+geo_primary_ssh_host_keys_folder: ""
+geo_primary_registry_key_file: ""
+geo_primary_psql_crt_file: ""
+
+geo_primary_postgres_host: ""
+
+# Geo Tracking Postgres
+geo_tracking_postgres_host: "{% if geo_secondary_praefect_postgres_host != '' and postgres_external %}{{ geo_secondary_praefect_postgres_host }}{% elif cloud_native_hybrid_geo and postgres_external %}{{ praefect_postgres_host }}{% else %}{{ geo_secondary_site_postgres_int_ip }}{% endif %}"
+geo_tracking_postgres_user: "gitlab_geo"
+geo_tracking_postgres_port: "5431"
+geo_tracking_postgres_password: "{{ postgres_password }}"
+geo_tracking_postgres_database: "gitlabhq_geo_production"
+geo_tracking_postgres_md5_auth_cidr_blocks: ['0.0.0.0/0']
+
+# Registry
+geo_primary_registry_url: "https://registry.{{ geo_primary_external_url | regex_replace('^https?:\/\/') }}"

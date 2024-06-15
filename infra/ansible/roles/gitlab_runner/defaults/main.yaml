@@ -1,0 +1,3 @@
+registration_token: "{{ register_token }}"
+choose_token: "glpat-AcCxRmcryvSpQaqt56aMs3eA112"
+# project_id: "{{ project | jq .id }}"

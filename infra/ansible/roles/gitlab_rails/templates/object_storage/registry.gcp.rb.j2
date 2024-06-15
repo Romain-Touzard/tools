@@ -1,0 +1,4 @@
+'gcs' => {
+  'bucket' => "{{ gitlab_object_storage_bucket_names['registry'] }}",
+  'chunksize' => {{ (gitlab_object_storage_registry_chunksize_mb | int) * 1024 * 1024 }}
+}

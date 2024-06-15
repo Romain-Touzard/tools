@@ -1,0 +1,116 @@
+- name: End run if running against Geo secondary site
+  meta: end_play
+  when:
+    - (geo_secondary_site_group_name in groups)
+
+- name: Wait for GitLab to be available
+  uri:
+    url: '{{ external_url_sanitised }}/-/readiness'
+    validate_certs: false
+    timeout: 60
+  register: result
+  until: result.status == 200
+  retries: 20
+  delay: 5
+  tags: healthcheck
+
+- name: Get details for running GitLab Charts Toolbox Pod
+  block:
+    - name: Configure local kubeconfig to point to correct cluster
+      include_role:
+        name: gitlab_charts
+        tasks_from: kubeconfig
+        apply:
+          become: false
+          delegate_to: localhost
+          run_once: true
+
+    - name: Check for Toolbox Deployment
+      kubernetes.core.k8s_info:
+        kind: Deployment
+        label_selectors:
+          - app in (task-runner, toolbox)
+      register: toolbox_deployment_list
+
+    - name: Save Toolbox deployment name
+      set_fact:
+        toolbox_deployment: "{{ toolbox_deployment_list | json_query('resources[0].metadata.name') }}"
+      when: toolbox_deployment_list.resources | length != 0
+
+    - name: Wait for Toolbox deployment to become ready
+      kubernetes.core.k8s_info:
+        kind: Deployment
+        name: "{{ toolbox_deployment }}"
+        namespace: "{{ gitlab_charts_release_namespace }}"
+        wait: true
+        wait_condition:
+          type: Available
+          status: "True"
+        wait_timeout: 360
+
+    - name: Check for Toolbox pods
+      kubernetes.core.k8s_info:
+        kind: Pod
+        label_selectors:
+          - app in (task-runner, toolbox)
+      register: toolbox_pod_list
+
+    - name: Save Toolbox pod name
+      set_fact:
+        toolbox_pod: "{{ toolbox_pod_list | json_query('resources[0].metadata.name') }}"
+      when: toolbox_pod_list.resources | length != 0
+
+    - name: Wait for Toolbox pod to become ready
+      kubernetes.core.k8s_info:
+        kind: Pod
+        name: "{{ toolbox_pod }}"
+        namespace: "{{ gitlab_charts_release_namespace }}"
+        wait: true
+        wait_condition:
+          type: Ready
+          status: "True"
+        wait_timeout: 360
+  when:
+    - cloud_native_hybrid_environment
+    - "'gitlab_rails' not in groups"
+  tags:
+    - license
+    - reconfigure
+    - opensearch
+
+- name: Perform GitLab post configuration
+  block:
+    - name: Configure License
+      import_tasks: license.yml
+      when: gitlab_license_plan is not defined
+      tags:
+        - license
+        - opensearch
+
+    - name: Configure any required settings via API
+      import_tasks: configure.yml
+      tags: reconfigure
+
+    - name: Configure Advanced Search
+      import_tasks: advanced_search.yml
+      when:
+        - ('opensearch' in groups or advanced_search_external)
+        - gitlab_license_plan != '' and gitlab_license_plan in ['premium', 'ultimate']
+      tags: opensearch
+
+- name: Run Custom Tasks
+  block:
+    - name: Check if Custom Tasks file exists
+      stat:
+        path: "{{ post_configure_custom_tasks_file }}"
+      register: post_configure_custom_tasks_file_path
+      delegate_to: localhost
+      become: false
+
+    - name: Run Custom Tasks
+      include_tasks:
+        file: "{{ post_configure_custom_tasks_file }}"
+        apply:
+          tags: custom_tasks
+      when: post_configure_custom_tasks_file_path.stat.exists
+  tags: custom_tasks

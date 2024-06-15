@@ -1,0 +1,5 @@
+---
+- hosts: all:!gitlab_*_node_pool:!ungrouped
+  roles:
+    - common
+  become: true

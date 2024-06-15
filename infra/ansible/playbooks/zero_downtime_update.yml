@@ -1,0 +1,10 @@
+---
+- import_playbook: playbook_prep.yml
+
+- hosts: all:!praefect_postgres:!gitlab_nfs:!haproxy_*
+  order: sorted
+  roles:
+    - zero_downtime_upgrade
+  become: true
+
+- import_playbook: post_configure.yml

@@ -1,0 +1,10 @@
+ansible
+google-auth
+requests
+netaddr
+boto3
+botocore
+openshift
+
+# Azure CLI requirements
+-r https://raw.githubusercontent.com/ansible-collections/azure/dev/requirements-azure.txt

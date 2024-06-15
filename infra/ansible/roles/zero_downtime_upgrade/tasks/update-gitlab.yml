@@ -1,0 +1,22 @@
+# Rails tends to serve incomplete pages incorrectly when going through update that healthchecks don't protect against (As the server is up but not serving all elements)
+# Stopping the node outright avoids this and ensures a better experience
+- name: Stop Rails node
+  command: gitlab-ctl stop
+  when: ('gitlab_rails' in group_names)
+  register: result
+  retries: 2
+  until: result is success
+
+- name: Run role
+  include_role:
+    name: "{{ (gitlab_node_type if 'redis' not in gitlab_node_type else 'redis') | replace('-', '_') }}"
+
+- name: Wait for GitLab Rails to be ready
+  uri:
+    url: 'http://localhost/-/readiness'
+    timeout: 60
+  register: result
+  until: result.status == 200
+  retries: 20
+  delay: 5
+  when: ('gitlab_rails' in group_names)

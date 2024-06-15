@@ -1,0 +1,55 @@
+---
+# Packages
+system_packages_deb: [aptitude, curl, openssh-server, ca-certificates, tzdata, python3-pip, nfs-common, postfix, jq, libpq-dev, nvme-cli]
+
+system_packages_rpm: ['curl', 'openssh-server', 'ca-certificates', 'tzdata', 'python3-pip', 'python3-devel', 'python3-libs', 'nfs-utils', 'postfix', 'jq', 'nvme-cli', 'gcc', 'yum-plugin-versionlock']
+system_packages_rhel: "{{ system_packages_rpm + ['libpq-devel'] }}"
+system_packages_amazon:
+  '2': "{{ system_packages_rpm + ['postgresql-devel'] }}"
+  '2023': "{{ (system_packages_rpm + ['libpq-devel']) | difference(['curl']) }}"
+
+system_packages_upgrade: "{{ lookup('env','SYSTEM_PACKAGES_UPGRADE') | default(false, true) }}"
+system_packages_autoremove: "{{ lookup('env','SYSTEM_PACKAGES_AUTOREMOVE') | default(false, true) }}"
+system_packages_auto_security_upgrade: "{{ lookup('env','SYSTEM_PACKAGES_AUTO_SECURITY_UPGRADE') | default(true, true) }}"
+
+# Python packages must target Python 3.6 for OS compatibility (RHEL 8) and be compatible with any OS installed Python packages
+python_packages: [google-auth==2.22.0, netaddr==0.8.0, PyYAML==6.0.1, docker==5.0.3, pexpect==4.8.0, psycopg2==2.9.8]
+
+# Secrets
+gitlab_secrets_write: true
+gitlab_secrets_post_reconfigure: false
+
+gitlab_custom_secrets_json: ""
+
+# Data Disks
+## GCP gives an ID that can be used as an alias to the device name
+## AWS gives no ID and requires the block device path
+disk_device_prefix:
+  gcp: "/dev/disk/by-id/google-"
+  aws: "/dev/"
+mkfs_opts: "-m 0 -F -E lazy_itable_init=0,lazy_journal_init=0,discard"
+mount_opts: "discard,defaults"
+mount_state: mounted
+
+## Each entry should be an array of hashes in the below format specifying the
+## disk device name and mount dir for the target group
+## Example:
+## gitaly_data_disks:
+##  - { device_name: 'data', mount_dir: '/var/opt/gitlab' }
+##  - { device_name: 'log', mount_dir: '/var/log/gitlab' }
+
+consul_data_disks: []
+postgres_data_disks: []
+pgbouncer_data_disks: []
+redis_data_disks: []
+redis_cache_data_disks: []
+redis_persistent_data_disks: []
+praefect_postgres_data_disks: []
+praefect_data_disks: []
+gitaly_data_disks: []
+gitlab_rails_data_disks: []
+sidekiq_data_disks: []
+monitor_data_disks: []
+haproxy_external_disks: []
+haproxy_internal_disks: []
+gitlab_nfs_disks: []

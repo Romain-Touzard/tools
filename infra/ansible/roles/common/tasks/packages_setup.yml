@@ -1,0 +1,81 @@
+---
+# Debian
+- name: Install system packages (Ubuntu / Debian)
+  apt:
+    name: "{{ system_packages_deb }}"
+    update_cache: true
+    state: "latest"
+  register: result
+  retries: 60
+  delay: 5
+  until: result is success
+  when: ansible_facts['os_family'] == "Debian"
+
+# RHEL
+- name: Setup EPEL Repo (RHEL)
+  block:
+    - name: Setup EPEL GPG key (RHEL)
+      rpm_key:
+        key: "https://dl.fedoraproject.org/pub/epel/RPM-GPG-KEY-EPEL-{{ ansible_facts['distribution_major_version'] }}"
+        state: present
+      register: result
+      retries: 5
+      delay: 5
+      until: result is success
+
+    - name: Setup EPEL Repo (RHEL)
+      yum:
+        name: "https://dl.fedoraproject.org/pub/epel/epel-release-latest-{{ ansible_facts['distribution_major_version'] }}.noarch.rpm"
+      register: result
+      retries: 5
+      delay: 5
+      until: result is success
+  when:
+    - ansible_facts['os_family'] == 'RedHat'
+    - ansible_facts['distribution'] != 'Amazon'
+    - not offline_setup
+
+- name: Install system packages (RHEL)
+  yum:
+    name: "{{ system_packages_rhel }}"
+    update_cache: true
+    state: "latest"
+  register: result
+  retries: 60
+  delay: 5
+  until: result is success
+  when:
+    - ansible_facts['os_family'] == 'RedHat'
+    - ansible_facts['distribution'] != 'Amazon'
+
+- name: Setup EPEL Repo (RHEL - Amazon Linux 2)
+  command: amazon-linux-extras install epel -y
+  when:
+    - ansible_facts['distribution'] == 'Amazon'
+    - ansible_facts['distribution_major_version'] == '2'
+    - not offline_setup
+
+# For more recent PG Client Libraries on Amazon Linux 2 only. Version doesn't need to match PG Server.
+- name: Enable PostgreSQL Client Repo (RHEL - Amazon Linux 2)
+  command: amazon-linux-extras enable postgresql13 -y
+  when:
+    - ansible_facts['distribution'] == 'Amazon'
+    - ansible_facts['distribution_major_version'] == '2'
+    - not offline_setup
+
+- name: Install system packages (Amazon Linux)
+  yum:
+    name: "{{ system_packages_amazon[ansible_facts['distribution_major_version']] }}"
+    update_cache: true
+    state: "latest"
+  register: result
+  retries: 60
+  delay: 5
+  until: result is success
+  when: ansible_facts['distribution'] == 'Amazon'
+
+# Python
+- name: Install python packages
+  pip:
+    name: "{{ python_packages }}"
+    extra_args: "--break-system-packages"

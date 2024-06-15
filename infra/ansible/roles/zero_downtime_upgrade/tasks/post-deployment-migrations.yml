@@ -1,0 +1,57 @@
+- name: Get Omnibus Postgres Primary
+  block:
+    - name: Get latest Postgres primary
+      command: gitlab-ctl get-postgresql-primary
+      register: postgres_leader_int_address
+      delegate_to: "{{ groups['postgres'][0] }}"
+      delegate_facts: true
+      become: true
+
+    - name: Update Postgres primary IP and Port
+      set_fact:
+        postgres_migrations_host: "{{ postgres_leader_int_address.stdout.split(':')[0] }}"
+        postgres_migrations_port: "{{ postgres_leader_int_address.stdout.split(':')[1] }}"
+  when:
+    - ('postgres' in groups and groups['postgres'] | length > 1)
+    - not postgres_external
+    - (geo_secondary_site_group_name not in group_names)
+
+- name: Set config for post deployment migrations on GitLab Rails deploy node
+  template:
+    src: templates/post-deployment-migrations.gitlab.rb.j2
+    dest: "/etc/gitlab/gitlab.gitlab_rails.post-deployment-migrations.rb"
+  when: (geo_primary_site_group_name not in groups or geo_primary_site_group_name in group_names)
+
+- name: Reconfigure GitLab Rails deploy node
+  command: gitlab-ctl reconfigure
+  when: (geo_primary_site_group_name not in groups or geo_primary_site_group_name in group_names)
+
+- name: Run post deployment migrations
+  command: gitlab-rake db:migrate
+  when: (geo_primary_site_group_name not in groups or geo_primary_site_group_name in group_names)
+
+- name: Remove config for post deployment migrations
+  file:
+    path: "/etc/gitlab/gitlab.gitlab_rails.post-deployment-migrations.rb"
+    state: absent
+  when: (geo_primary_site_group_name not in groups or geo_primary_site_group_name in group_names)
+
+- name: Reconfigure GitLab Rails deploy node
+  command: gitlab-ctl reconfigure
+  when: (geo_primary_site_group_name not in groups or geo_primary_site_group_name in group_names)
+
+- name: Run Geo check on primary site
+  command: gitlab-rake gitlab:geo:check
+  when: (geo_primary_site_group_name in group_names)
+
+- name: Run Geo DB migrations and verify secondary site
+  block:
+    - name: Run migrations on secondary site
+      command: gitlab-rake {{ geo_migration_task }}
+
+    - name: Run Geo check on secondary site
+      command: gitlab-rake gitlab:geo:check
+
+    - name: Verify Geo status
+      command: gitlab-rake geo:status
+  when: (geo_secondary_site_group_name in group_names)

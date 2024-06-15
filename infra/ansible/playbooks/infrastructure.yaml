@@ -1,0 +1,19 @@
+- hosts: gitlab    
+  roles:
+    # - configure
+    # - common
+    # - post_install
+    # - docker_registry
+  become: true
+
+# - hosts: docker_swarm
+#   roles:
+#     - docker_swarm
+#   become: true
+
+- hosts: gitlab
+  roles:
+    - gitlab_runner
+    # - quantum_motors
+  become: true
+

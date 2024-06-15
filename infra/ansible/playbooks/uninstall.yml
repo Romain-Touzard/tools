@@ -1,0 +1,39 @@
+---
+- hosts: all:!gitlab_*_node_pool:!ungrouped
+  become: true
+
+  roles:
+    - common_vars
+
+  tasks:
+    - name: Uninstall GitLab Omnibus
+      include_role:
+        name: common
+        tasks_from: uninstall
+      when: omnibus_node
+
+    - name: Perform Custom Uninstall Tasks
+      block:
+        - name: Check if Custom Uninstall tasks file exists
+          stat:
+            path: "{{ uninstall_custom_tasks_file }}"
+          register: uninstall_custom_tasks_file_path
+          delegate_to: localhost
+          become: false
+
+        - name: Run Custom Uninstall tasks
+          include_tasks: "{{ uninstall_custom_tasks_file }}"
+          when: uninstall_custom_tasks_file_path.stat.exists
+      when: omnibus_node
+
+- hosts: localhost
+
+  roles:
+    - common_vars
+
+  tasks:
+    - name: Uninstall GitLab Charts
+      include_role:
+        name: gitlab_charts
+        tasks_from: uninstall
+      when: cloud_native_hybrid_environment

@@ -1,0 +1,316 @@
+---
+- name: Perform Common Tasks
+  block:
+    - name: Populate service facts
+      service_facts:
+
+    - name: Populate package facts
+      package_facts:
+
+    - name: Set Internal Hostname to match inventory
+      hostname:
+        name: "{{ inventory_hostname }}"
+      when:
+        - cloud_provider == 'aws'
+        - ansible_hostname != inventory_hostname
+      tags: hostname
+
+    - name: Add GitLab repository GPG key
+      block:
+        - name: Install gnupg (Debian)
+          apt:
+            name: "gnupg"
+            update_cache: true
+          register: result
+          retries: 20
+          delay: 5
+          until: result is success
+          when: ansible_facts['distribution'] == "Debian"
+
+        - name: Add GitLab repository GPG key (Ubuntu / Debian)
+          apt_key:
+            url: https://packages.gitlab.com/gpg.key
+            state: present
+          register: result
+          retries: 2
+          delay: 3
+          until: result is success
+          when: ansible_facts['os_family'] == "Debian"
+
+        - name: Add GitLab repository GPG key (RHEL)
+          rpm_key:
+            key: https://packages.gitlab.com/gpg.key
+            state: present
+          register: result
+          retries: 2
+          delay: 3
+          until: result is success
+          when: ansible_facts['os_family'] == 'RedHat'
+      tags: gpg
+      when:
+        - omnibus_node
+        - gitlab_repo_package != ''
+        - gitlab_deb_download_url == '' and gitlab_rpm_download_url == ''
+        - gitlab_deb_host_path == '' and gitlab_rpm_host_path == ''
+        - not offline_setup
+
+    - name: Setup Packages
+      import_tasks: packages_setup.yml
+      tags: packages
+      when: not offline_setup
+
+    # https://about.gitlab.com/blog/2019/11/15/tracking-down-missing-tcp-keepalives/
+    - name: Configure TCP keepalive settings
+      sysctl:
+        name: net.ipv4.tcp_keepalive_time
+        value: '300'
+        sysctl_set: true
+        state: present
+        reload: true
+      tags: sysctl
+
+    - name: Mount any data disks
+      block:
+        - name: Get Group Data Disks Config
+          set_fact:
+            group_data_disks: "{{ lookup('vars', gitlab_node_type + '_data_disks', default=[]) }}"
+          tags: nvme
+
+        - name: Mount data disks
+          import_tasks: data_disks.yml
+          when: group_data_disks | length > 0
+      when: cloud_provider != 'none'
+      tags: data_disks
+
+    # Create select GitLab folders if missing. Allows for setup before reconfigure.
+    - name: Create select GitLab dirs if missing
+      file:
+        path: "{{ item.path }}"
+        owner: root
+        group: root
+        mode: "{{ item.mode }}"
+        state: directory
+      loop:
+        - { path: '/etc/gitlab', mode: '0775' }   # GitLab Issue: https://gitlab.com/gitlab-org/omnibus-gitlab/-/issues/5814
+        - { path: '/etc/gitlab/ssl', mode: '0755' }
+        - { path: '/etc/gitlab/trusted-certs', mode: '0755' }
+      when: omnibus_node
+      tags: reconfigure
+
+    # Workaround for https://gitlab.com/gitlab-org/omnibus-gitlab/-/issues/6364
+    - name: Create skip-unmigrated-data-check file
+      file:
+        path: /etc/gitlab/skip-unmigrated-data-check
+        state: touch
+      when: omnibus_node
+      tags: reconfigure
+
+    - name: Get GitLab json config file stats if it exists
+      stat:
+        path: "/opt/gitlab/embedded/nodes/{{ ansible_fqdn }}.json"
+      register: gitlab_json_config_file
+      tags: reconfigure
+
+    - name: Delete GitLab json config file if malformed
+      file:
+        path: "/opt/gitlab/embedded/nodes/{{ ansible_fqdn }}.json"
+        state: absent
+      when:
+        - gitlab_json_config_file.stat.exists
+        - gitlab_json_config_file.stat.size < 500
+      tags: reconfigure
+
+    - name: Unlock GitLab package installs
+      command: "{{ 'yum versionlock delete' if ansible_facts['os_family'] == 'RedHat' else 'aptitude unhold' }} {{ gitlab_edition }}"
+      register: result
+      retries: 30
+      delay: 10
+      until: result is success
+      failed_when:
+        - result.rc != 0
+        - ('no matches' not in result.stderr)
+      when:
+        - omnibus_node
+        - "'gitlab-ee' in packages"
+
+    - name: Install GitLab package via repo if configured
+      block:
+        # Removes the official release repo if it's present as we typically want to stick with Nightly
+        # Prevents apt from switching to the release channel (when an official release is younger than nightly)
+        - name: Ensure only GitLab Nightly apt repo is installed unless specified otherwise (Ubuntu / Debian)
+          file:
+            path: '/etc/apt/sources.list.d/gitlab_{{ gitlab_edition }}.list'
+            state: absent
+          when:
+            - omnibus_node
+            - gitlab_repo_script_url == "https://packages.gitlab.com/install/repositories/gitlab/nightly-builds/script.deb.sh"
+            - ansible_facts['os_family'] == "Debian"
+
+        - name: Download GitLab repository installation script
+          get_url:
+            url: "{{ gitlab_repo_script_url }}"
+            dest: "{{ gitlab_repo_script_path }}"
+            force: true
+          register: repo_file_download
+          retries: 20
+          delay: 5
+          until: repo_file_download is success
+
+        - name: Check if repo list file exists
+          stat:
+            path: "{{ gitlab_repo_list_path }}"
+          register: repo_file
+
+        - name: Install GitLab repository
+          command: "bash {{ gitlab_repo_script_path }}"
+          register: result
+          retries: 2
+          delay: 10
+          until: result is success
+          when: repo_file_download.changed or (not repo_file.stat.exists)
+
+        # Install GitLab Package via repo. State of latest means always run apt install
+        # If gitlab_version is passed then this will always install that version
+        - name: Install GitLab repo package (deb)
+          apt:
+            name: "{{ gitlab_repo_package }}"
+            state: "{{ 'present' if gitlab_version != '' else 'latest' }}"
+            lock_timeout: 360
+            allow_change_held_packages: true
+          register: result
+          retries: 12
+          delay: 5
+          until: result is success
+          when: ansible_facts['os_family'] == "Debian"
+
+        - name: Install GitLab repo package (rpm)
+          yum:
+            name: "{{ gitlab_repo_package }}"
+            state: "{{ 'present' if gitlab_version != '' else 'latest' }}"
+            lock_timeout: 360
+          register: result
+          retries: 12
+          delay: 5
+          until: result is success
+          when: ansible_facts['os_family'] == 'RedHat'
+      when:
+        - omnibus_node
+        - gitlab_repo_package != ''
+        - gitlab_deb_download_url == '' and gitlab_rpm_download_url == ''
+        - gitlab_deb_host_path == '' and gitlab_rpm_host_path == ''
+        - not offline_setup
+
+    - name: Install GitLab deb package if given
+      block:
+        - name: Download GitLab deb package
+          get_url:
+            url: "{{ gitlab_deb_download_url }}"
+            dest: "{{ gitlab_deb_target_path }}"
+            force: true
+            headers: "{{ gitlab_deb_download_url_headers }}"
+          when:
+            - omnibus_node
+            - gitlab_deb_download_url != ''
+
+        - name: Copy GitLab deb package
+          copy:
+            src: "{{ gitlab_deb_host_path }}"
+            dest: "{{ gitlab_deb_target_path }}"
+            mode: "0755"
+            force: true
+          when:
+            - omnibus_node
+            - gitlab_deb_host_path != ''
+
+        - name: Install GitLab deb package
+          apt:
+            deb: "{{ gitlab_deb_target_path }}"
+            force: "{{ gitlab_deb_force_install }}"
+            allow_change_held_packages: true
+          when:
+            - omnibus_node
+            - (gitlab_deb_host_path != '') or (gitlab_deb_download_url != '')
+      when: ansible_facts['os_family'] == "Debian"
+
+    - name: Install GitLab rpm package if given
+      block:
+        - name: Download GitLab rpm package
+          get_url:
+            url: "{{ gitlab_rpm_download_url }}"
+            dest: "{{ gitlab_rpm_target_path }}"
+            force: true
+            headers: "{{ gitlab_rpm_download_url_headers }}"
+          when:
+            - omnibus_node
+            - gitlab_rpm_download_url != ''
+
+        - name: Copy GitLab rpm package
+          copy:
+            src: "{{ gitlab_rpm_host_path }}"
+            dest: "{{ gitlab_rpm_target_path }}"
+            mode: "0755"
+            force: true
+          when:
+            - omnibus_node
+            - gitlab_rpm_host_path != ''
+
+        - name: Install GitLab rpm package
+          yum:
+            name: "{{ gitlab_rpm_target_path }}"
+            disable_gpg_check: true
+          when:
+            - omnibus_node
+            - (gitlab_rpm_host_path != '') or (gitlab_rpm_download_url != '')
+      when: ansible_facts['os_family'] == 'RedHat'
+
+    - name: Lock GitLab package updates
+      command: "{{ 'yum versionlock' if ansible_facts['os_family'] == 'RedHat' else 'aptitude hold' }} {{ gitlab_edition }}"
+      register: result
+      retries: 60
+      delay: 5
+      until: result is success
+      when: omnibus_node
+      tags: packages
+
+    - name: Configure sshguard whitelist if present
+      block:
+        - name: Add internal cidr to sshguard whitelist
+          lineinfile:
+            path: /etc/sshguard/whitelist
+            regexp: "^{{ internal_cidr_16 }}$"
+            line: "{{ internal_cidr_16 }}"
+          register: sshguard_whitelist
+
+        - name: Restart sshguard
+          service:
+            name: sshguard
+            state: restarted
+          when: sshguard_whitelist.changed
+      when: "'sshguard' in services"
+
+    - name: Upgrade Packages
+      import_tasks: packages_upgrade.yml
+      tags: packages
+      when: not offline_setup
+
+    - name: Run Custom Tasks
+      block:
+        - name: Check if Custom Tasks file exists
+          stat:
+            path: "{{ common_custom_tasks_file }}"
+          register: common_custom_tasks_file_path
+          delegate_to: localhost
+          become: false
+
+        - name: Run Custom Tasks
+          include_tasks:
+            file: "{{ common_custom_tasks_file }}"
+            apply:
+              tags: custom_tasks
+          when: common_custom_tasks_file_path.stat.exists
+      tags: custom_tasks
+
+    - name: Mark common has run
+      set_fact:
+        common_performed: true
+  when: common_performed is not defined

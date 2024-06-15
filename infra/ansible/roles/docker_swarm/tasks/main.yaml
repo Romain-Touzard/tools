@@ -1,0 +1,25 @@
+---
+- name: Initialize Docker Swarm
+  docker_swarm:
+    state: present
+    advertise_addr: "{{ ansible_default_ipv4['address'] }}"
+  register: output_swarm
+  when: inventory_hostname == 'swarm_master'
+
+- name: Join Docker Swarm as worker
+  docker_swarm:
+    state: join
+    join_token: "{{ hostvars['swarm_master']['output_swarm']['swarm_facts']['JoinTokens']['Worker'] }}"
+    advertise_addr: "{{ ansible_default_ipv4['address'] }}"
+    remote_addrs: "{{ hostvars['swarm_master']['ansible_host'] }}"
+  when: inventory_hostname == 'swarm_worker'
+
+- name: Join Docker Swarm as worker
+  docker_swarm:
+    state: join
+    join_token: "{{ hostvars['swarm_master']['output_swarm']['swarm_facts']['JoinTokens']['Worker'] }}"
+    advertise_addr: "{{ ansible_default_ipv4['address'] }}"
+    remote_addrs: "{{ hostvars['swarm_master']['ansible_host'] }}"
+  when: inventory_hostname == 'swarm_worker2'
+
+

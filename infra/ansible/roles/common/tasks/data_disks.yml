@@ -1,0 +1,57 @@
+---
+- name: Run NVMe to Block symlink script (AWS)
+  script: 'aws-data-disks/ebs-nvme-block-symlinks.sh'
+  when: cloud_provider == 'aws'
+  tags: nvme
+
+- name: Stat the disks
+  stat:
+    path: "{{ disk_device_prefix[cloud_provider] + item.device_name if '/' not in item.device_name else item.device_name }}"
+  register: disks_info
+  loop: "{{ group_data_disks }}"
+
+- name: Check if block device name exists
+  assert:
+    that: disks_info.results[loop_index].stat.exists
+    fail_msg: "Block device name '{{ disks_info.results[loop_index].item.device_name }}' doesn't exist. Exiting."
+    quiet: true
+  loop: "{{ group_data_disks }}"
+  loop_control:
+    index_var: loop_index
+
+- name: Create ext4 filesystem
+  filesystem:
+    fstype: ext4
+    dev: "{{ disk_device_prefix[cloud_provider] + item.device_name if '/' not in item.device_name else item.device_name }}"
+    opts: "{{ mkfs_opts }}"
+  register: result
+  retries: 2
+  delay: 10
+  until: result is success
+  loop: "{{ group_data_disks }}"
+
+# Device names may change on reboot so it is always best to use
+# the UUID of disks in /etc/fstab
+- name: Get the UUID for the device
+  command: "blkid -s UUID -o value {{ disk_device_prefix[cloud_provider] + item.device_name if '/' not in item.device_name else item.device_name }}"
+  register: device_uuids
+  changed_when: false
+  loop: "{{ group_data_disks }}"
+
+- name: Create directory for mount
+  file:
+    path: "{{ item.mount_dir }}"
+    state: directory
+    mode: '0755'
+  loop: "{{ group_data_disks }}"
+
+- name: Mount the disk
+  mount:
+    path: "{{ item.mount_dir }}"
+    src: "UUID={{ device_uuids.results[loop_index].stdout }}"
+    fstype: ext4
+    state: "{{ mount_state }}"
+    opts: "{{ mount_opts }}"
+  loop: "{{ group_data_disks }}"
+  loop_control:
+    index_var: loop_index

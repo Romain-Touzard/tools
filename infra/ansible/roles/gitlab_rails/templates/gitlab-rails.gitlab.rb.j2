@@ -1,0 +1,335 @@
+roles ['application_role']
+
+external_url '{{ external_url_sanitised }}'
+
+puma['listen'] = '0.0.0.0'
+
+{% if gitlab_root_password != '' %}
+gitlab_rails['initial_root_password'] = "{{ gitlab_root_password }}"
+{% endif %}
+
+gitlab_rails['gitlab_shell_ssh_port'] = "{{ gitlab_shell_ssh_port }}"
+{% if gitlab_shell_ssh_daemon == 'gitlab-sshd' %}
+gitlab_sshd['enable'] = true
+gitlab_sshd['listen_address'] ="[::]:{{ gitlab_shell_ssh_internal_port }}"
+{% endif %}
+
+# Ensure UIDs and GIDs match between servers for permissions
+user['uid'] = 9000
+user['gid'] = 9000
+web_server['uid'] = 9001
+web_server['gid'] = 9001
+
+# Nginx Config
+nginx['enable'] = true
+nginx['status']['options'] = {
+  "server_tokens" => "off",
+  "access_log" => "off",
+  "deny" => "all",
+{% if 'monitor' in groups %}
+  "allow" => "{{ monitor_int_ip }}"
+{% endif -%}
+}
+
+### Read X-Forwarded-For Header of HAProxy
+# other real_ip config options
+nginx['real_ip_header'] = 'X-Forwarded-For'
+nginx['real_ip_recursive'] = 'on'
+# Each address is added to NGINX config as 'set_real_ip_from <address>;'
+nginx['real_ip_trusted_addresses'] = [
+  '127.0.0.0/8',
+{% if 'haproxy_external' in groups %}
+  '{{ haproxy_external_int_addr }}',
+{% endif %}
+{% if 'haproxy_internal' in groups %}
+  '{{ haproxy_internal_int_addr }}',
+{% endif %}
+{% for cidr_block in gitlab_rails_nginx_real_ip_trusted_cidr_blocks %}
+  "{{ cidr_block }}",
+{% endfor %}
+]
+
+{% if external_url_ssl %}
+nginx['listen_port'] = 80
+nginx['listen_https'] = false
+nginx['hsts_max_age'] = 0
+
+letsencrypt['enable'] = false
+{% endif %}
+
+{% if container_registry_enable %}
+registry['enable'] = true
+registry_external_url "{{ container_registry_external_url }}"
+
+registry_nginx['listen_port'] = 80
+registry_nginx['listen_https'] = false
+{% else %}
+registry['enable'] = false
+{% endif %}
+
+# Storage Config
+## Object Storage - consolidated object storage configuration
+
+{% if gitlab_object_storage_type == 'object_storage' and cloud_provider != 'none' %}
+gitlab_rails['object_store']['enabled'] = true
+
+### Provider-specific connection settings
+gitlab_rails['object_store']['connection'] = {
+  {{ lookup('template', 'object_storage/' + cloud_provider + '.rb.j2') | indent(width=2) }}
+}
+
+{% for obj_stor_name in (gitlab_object_storage_list | reject('equalto', 'backups|registry|ci_secure_files|external_diffs')) %}
+gitlab_rails['object_store']['objects']['{{ obj_stor_name }}']['bucket'] = '{{ gitlab_object_storage_bucket_names[obj_stor_name] }}'
+{% endfor %}
+
+## Object Storage - External Diffs (Outdated)
+{% if 'external_diffs' in gitlab_object_storage_list %}
+gitlab_rails['external_diffs_enabled'] = true
+gitlab_rails['external_diffs_when'] = 'outdated'
+gitlab_rails['object_store']['objects']['external_diffs']['bucket'] = "{{ gitlab_object_storage_bucket_names['external_diffs'] }}"
+{% endif %}
+
+## Object Storage - CI Secure Files (15.7+)
+{% if 'ci_secure_files' in gitlab_object_storage_list and (gitlab_version == '' or gitlab_version is version('15.7', '>=')) %}
+gitlab_rails['ci_secure_files_object_store_enabled'] = true
+gitlab_rails['ci_secure_files_object_store_remote_directory'] = "{{ gitlab_object_storage_bucket_names['ci_secure_files'] }}"
+gitlab_rails['ci_secure_files_object_store_connection'] = {
+  {{ lookup('template', 'object_storage/' + cloud_provider + '.rb.j2') | indent(width=2) }}
+}
+{% endif %}
+
+## Object Storage - Container Registry
+{% if container_registry_enable %}
+registry['storage'] = {
+  {{ lookup('template', 'object_storage/registry.' + cloud_provider + '.rb.j2') | indent(width=2) }}
+}
+{% endif %}
+
+## Object Storage - Backups
+{% if 'backups' in gitlab_object_storage_list %}
+gitlab_rails['backup_upload_connection'] = {
+  {{ lookup('template', 'object_storage/' + cloud_provider + '.rb.j2') | indent(width=2) }}
+}
+gitlab_rails['backup_upload_remote_directory'] = "{{ gitlab_object_storage_bucket_names['backups'] }}"
+{% endif %}
+
+{% elif 'gitlab_nfs' in groups and gitlab_object_storage_type == 'nfs' %}
+
+## NFS - Objects
+gitlab_rails['uploads_directory'] = '{{ gitlab_nfs_path }}/uploads'
+gitlab_rails['shared_path'] = '{{ gitlab_nfs_path }}/shared'
+gitlab_ci['builds_directory'] = '{{ gitlab_nfs_path }}/builds'
+{% endif %}
+
+{% if 'consul' in groups %}
+# Consul Agent (Monitoring Auto Discovery)
+consul['enable'] = true
+consul['configuration'] = {
+  bind_addr: '{{ ansible_default_ipv4.address }}',
+  retry_join: %w({{ (consul_int_addrs | join(' ')) }})
+}
+consul['monitoring_service_discovery'] = true
+{% endif %}
+
+node_exporter['listen_address'] = '0.0.0.0:9100'
+gitlab_workhorse['prometheus_listen_addr'] = '0.0.0.0:9229'
+gitlab_rails['monitoring_whitelist'] = [
+  '127.0.0.0/8',
+{% for cidr_block in gitlab_rails_monitoring_cidr_blocks %}
+  "{{ cidr_block }}",
+{% endfor %}
+]
+
+# Components Config
+# Redis
+{% if redis_external %}
+## Redis Non Omnibus (PaaS \ User Provided)
+### Combined Queues
+gitlab_rails['redis_host'] = '{{ redis_host }}'
+gitlab_rails['redis_port'] = '{{ redis_port }}'
+gitlab_rails['redis_password'] = '{{ redis_password }}'
+gitlab_rails['redis_ssl'] = {{ redis_external_ssl | lower }}
+gitlab_rails['redis_enable_client'] = {{ redis_external_enable_client | lower }}
+
+{% elif redis_cache_external and redis_persistent_external %}
+### Separate Queues
+#### Default
+gitlab_rails['redis_host'] = '{{ redis_persistent_host }}'
+gitlab_rails['redis_port'] = '{{ redis_persistent_port }}'
+gitlab_rails['redis_password'] = '{{ redis_persistent_password }}'
+gitlab_rails['redis_ssl'] = {{ redis_persistent_external_ssl | lower }}
+
+#### Cache
+gitlab_rails['redis_cache_instance'] = '{{ "rediss" if redis_cache_external_ssl else "redis" }}://:{{ redis_cache_password}}@{{ redis_cache_host }}:{{ redis_cache_port }}'
+
+{% elif 'redis' in groups %}
+## Redis Omnibus - Separate Node(s)
+### Single Node - Combined Queues
+{% if groups['redis'] | length == 1 %}
+gitlab_rails['redis_host'] = '{{ redis_host }}'
+gitlab_rails['redis_port'] = '{{ redis_port }}'
+gitlab_rails['redis_password'] = '{{ redis_password }}'
+
+{% elif groups['redis'] | length > 1 %}
+### Multi Node - Combined Queues
+redis['master_name'] = 'gitlab-redis'
+redis['master_password'] = '{{ redis_password }}'
+
+gitlab_rails['redis_sentinels'] = [
+{% for ip in redis_int_addrs %}
+  {host: '{{ ip }}', port: {{ redis_sentinel_port }}},
+{% endfor %}
+]
+{% endif %}
+
+{% elif 'redis_cache' in groups and 'redis_persistent' in groups %}
+### Multi Node - Separate Queues
+#### Default
+redis['master_name'] = 'gitlab-redis-persistent'
+redis['master_password'] = '{{ redis_persistent_password }}'
+
+gitlab_rails['redis_sentinels'] = [
+{% for ip in redis_persistent_int_addrs %}
+  {host: '{{ ip }}', port: {{ redis_sentinel_port }}},
+{% endfor %}
+]
+
+#### Cache
+gitlab_rails['redis_cache_instance'] = 'redis://:{{ redis_cache_password }}@gitlab-redis-cache'
+gitlab_rails['redis_cache_sentinels'] = [
+{% for ip in redis_cache_int_addrs %}
+  {host: '{{ ip }}', port: {{ redis_sentinel_port }}},
+{% endfor %}
+]
+{% else %}
+## Redis Omnibus - Local
+redis['enable'] = true
+redis_exporter['listen_address'] = '0.0.0.0:9121'
+{% endif %}
+
+{% if 'sidekiq' in groups %}
+## Sidekiq - Separate Node(s)
+sidekiq['enable'] = false
+{% else %}
+## Sidekiq - Local
+sidekiq['enable'] = true
+sidekiq['listen_address'] = '0.0.0.0'
+{% if gitlab_version != '' and gitlab_version is version('15.7', '<') %}
+sidekiq['max_concurrency'] = 20
+{% endif %}
+### Sidekiq - Scale up workers dynamically to 1/4 of CPUS unless single node
+{% if 'gitaly' in groups %}
+sidekiq['queue_groups'] = [
+{% for cpu in range([(ansible_processor_vcpus / 4) | int, 1] | max) %}
+  "*",
+{% endfor %}
+]
+{% endif %}
+{% endif %}
+
+# Postgres
+{% if postgres_external %}
+## Postgres Non Omnibus (PaaS \ User Provided)
+
+{% if db_migrate is defined and db_migrate == true %}
+gitlab_rails['db_host'] = '{{ postgres_migrations_host }}'
+gitlab_rails['db_port'] = '{{ postgres_migrations_port }}'
+gitlab_rails['auto_migrate'] = {{ (('gitlab_rails_primary' in group_names) and (geo_secondary_site_group_name not in groups)) | lower }}
+{% else %}
+gitlab_rails['db_host'] = '{{ postgres_host }}'
+gitlab_rails['db_port'] = '{{ postgres_port }}'
+gitlab_rails['auto_migrate'] = false
+{% endif %}
+gitlab_rails['db_username'] = '{{ postgres_username }}'
+gitlab_rails['db_password'] = '{{ postgres_password }}'
+gitlab_rails['db_database'] = '{{ postgres_database_name }}'
+
+{% if postgres_load_balancing_hosts | length > 0 %}
+gitlab_rails['db_load_balancing'] = { 'hosts' => {{ postgres_load_balancing_hosts }} }
+{% endif %}
+
+{% elif 'postgres' in groups %}
+## Postgres Omnibus - Separate Node(s)
+postgresql['enable'] = false
+
+{% if 'pgbouncer' not in groups or (db_migrate is defined and db_migrate == true) %}
+gitlab_rails['db_host'] = '{{ postgres_migrations_host }}'
+gitlab_rails['db_port'] = '{{ postgres_migrations_port }}'
+gitlab_rails['auto_migrate'] = {{ (('gitlab_rails_primary' in group_names) and (geo_secondary_site_group_name not in groups)) | lower }}
+{% else %}
+gitlab_rails['db_host'] = "{{ internal_lb_host }}"
+gitlab_rails['db_port'] = 6432
+gitlab_rails['auto_migrate'] = false
+{% endif %}
+gitlab_rails['db_password'] = '{{ postgres_password }}'
+
+{% if groups['postgres'] | length > 1 %}
+gitlab_rails['db_load_balancing'] = { 'hosts' => {{ postgres_int_addrs }} }
+{% endif %}
+
+{% else %}
+## Postgres Omnibus - Local
+
+postgresql['enable'] = true
+postgresql['trust_auth_cidr_addresses'] = {{ postgres_trust_auth_cidr_blocks }}
+postgres_exporter['listen_address'] = '0.0.0.0:9187'
+{% if postgres_version is defined %}
+postgresql['version'] = {{ postgres_version }}
+{% endif %}
+{% endif %}
+
+{% if 'monitor' in groups %}
+## Monitor - Separate Node(s)
+prometheus['enable'] = false
+{% endif %}
+
+gitlab_workhorse['env'] = {
+{%- if geo_disable_secondary_proxying %}
+  "GEO_SECONDARY_PROXY" => "0",
+{% endif %}
+}
+
+{% if 'praefect' in groups %}
+## Gitaly Cluster - Separate Node(s)
+gitaly['enable'] = false
+git_data_dirs({
+  "default" => {
+    "gitaly_address" => "{{ 'tls' if praefect_ssl else 'tcp' }}://{{ internal_lb_host }}:{{ praefect_ssl_port if gitaly_ssl else '2305' }}",
+    "gitaly_token" => '{{ praefect_external_token }}'
+  }
+})
+{% elif 'gitaly' in groups %}
+## Gitaly - Separate Node(s)
+gitaly['enable'] = false
+gitlab_rails['gitaly_token'] = '{{ gitaly_token }}'
+
+git_data_dirs({
+  'default' => { 'gitaly_address' => "{{ 'tls' if gitaly_ssl else 'tcp' }}://{{ gitaly_primary_int_addr }}:{{ gitaly_ssl_port if gitaly_ssl else '8075' }}" },
+  'storage1' => { 'gitaly_address' => "{{ 'tls' if gitaly_ssl else 'tcp' }}://{{ gitaly_primary_int_addr }}:{{ gitaly_ssl_port if gitaly_ssl else '8075' }}" },
+{% for gitaly_secondary_ip in gitaly_secondary_int_addrs %}
+  "storage{{loop.index + 1}}" => { 'gitaly_address' => "{{ 'tls' if gitaly_ssl else 'tcp' }}://{{ gitaly_secondary_ip }}:{{ gitaly_ssl_port if gitaly_ssl else '8075' }}" },
+{% endfor %}
+})
+{% else %}
+## Gitaly - Local
+gitaly['enable'] = true
+
+{% if gitlab_version == '' or gitlab_version is version('15.10', '>=') %}
+gitaly['configuration'] = {
+  prometheus_listen_addr: '0.0.0.0:9236',
+}
+{% else %}
+gitaly['prometheus_listen_addr'] = "0.0.0.0:9236"
+{% endif %}
+
+{% endif %}
+
+geo_confs = Dir.glob(File.join("/etc/gitlab/", "gitlab.geo.*.rb"))
+geo_confs.each { |conf|
+  from_file conf
+}
+
+custom_confs = Dir.glob(File.join("/etc/gitlab/", "gitlab.gitlab_rails.*.rb"))
+custom_confs.each { |conf|
+  from_file conf
+}

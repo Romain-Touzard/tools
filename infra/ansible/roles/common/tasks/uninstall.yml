@@ -1,0 +1,44 @@
+---
+- name: Run gitlab-ctl cleanse against all Omnibus nodes
+  command: gitlab-ctl cleanse
+  register: result
+  failed_when:
+    - result.rc != 0
+    - ('No such file or directory' not in result.msg)
+
+- name: Unlock GitLab package installs
+  command: "{{ 'yum versionlock delete' if ansible_facts['os_family'] == 'RedHat' else 'aptitude unhold' }} {{ gitlab_edition }}"
+  retries: 60
+  delay: 5
+  register: result
+
+- name: Uninstall GitLab repo package
+  package:
+    name: "{{ gitlab_repo_package }}"
+    state: absent
+  register: result
+  retries: 2
+  delay: 3
+
+- name: Remove GitLab repository (Ubuntu)
+  command: "apt-add-repository -r https://packages.gitlab.com/gitlab/{{ gitlab_edition }}/ubuntu/ --yes"
+  when: ansible_facts['distribution'] == "Ubuntu"
+
+- name: Remove GitLab repository (Debian)
+  command: "apt-add-repository -r https://packages.gitlab.com/gitlab/{{ gitlab_edition }}/debian/ --yes"
+  when: ansible_facts['distribution'] == "Debian"
+
+- name: Remove GitLab repository (RHEL)
+  yum_repository:
+    name: "{{ item }}"
+    file: "gitlab_{{ gitlab_edition }}"
+    state: absent
+  loop:
+    - "gitlab_{{ gitlab_edition }}"
+    - "gitlab_{{ gitlab_edition }}-source"
+  when: ansible_facts['os_family'] == 'RedHat'
+
+- name: Remove the repository script file
+  file:
+    path: "{{ gitlab_repo_script_path }}"
+    state: absent

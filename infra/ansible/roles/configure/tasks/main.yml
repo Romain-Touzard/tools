@@ -1,0 +1,21 @@
+---
+- name : Configure the system
+  block: 
+
+  - name: Change the hostname
+    hostname:
+      name: "{{ external_host }}"
+    become: true
+    become_user: root
+    become_method: sudo
+    when: external_host is defined
+
+  - name: Add local DNS resolution for {{ external_host }}
+    lineinfile:
+        path: /etc/hosts
+        regexp: '^127\.0\.0\.1'
+        line: "127.0.0.1      localhost {{ external_host }}"
+        owner: root
+        group: root
+        mode: '0644'
+

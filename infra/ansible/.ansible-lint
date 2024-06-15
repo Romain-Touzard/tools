@@ -1,0 +1,30 @@
+exclude_paths:
+  - ${HOME}/.ansible/roles/
+  - playbooks/error-search.yml
+  - playbooks/test*.yml
+  - environments/
+skip_list:
+  - experimental
+  - risky-file-permissions  # Lines should be no longer than 160 char
+  - no-changed-when  # File permissions unset or incorrect
+  - command-instead-of-shell  # Commands should not change things if nothing needs doing
+  - risky-shell-pipe  # Use shell only when shell functionality is required - to be reenabled
+  - empty-string-compare  # Shells that use pipes should set the pipefail option
+  - meta-no-info  # Don't compare to empty string, https://github.com/ansible-community/ansible-lint/issues/457
+  - command-instead-of-module  # meta/main.yml should contain relevant info
+  - line-length
+  - yaml[line-length]
+  - braces
+  - package-latest
+  - fqcn-builtins # Use full names - Optional in Ansible
+  - fqcn[action] # Use full names - Optional in Ansible
+  - var-spacing  # https://github.com/ansible/ansible-lint/issues/2209
+  - no-handler # Tasks that run when changed should likely be handlers
+  - name[play] # All plays should be named.
+  - name[template] # Jinja templates should only be end at name
+  - galaxy[no-changelog] # Collection changelog missing - Optional in Ansible
+  - galaxy[no-runtime] # Collection runtime config file missing - Optional in Ansible
+  - key-order[task] # You can improve the task key order to: name, when, block - Optional in Ansible
+  - var-naming[no-role-prefix] # Variables names from within roles should use role_name_ as a prefix - Optional in Ansible, subjective.
+  - run-once[task] # This rule warns against the use of run_once when the strategy is set to free - Fires regardless of what's set in strategy
+offline: true
